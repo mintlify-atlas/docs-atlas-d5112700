@@ -1,0 +1,394 @@
+---
+title: "Next.js Server Actions Reference for OASIS Seguros"
+sidebarTitle: "Server Actions"
+description: "Complete reference for OASIS Seguros Next.js Server Actions covering policy, payment, client, and search operations with input schemas and response types."
+---
+
+Server Actions are Next.js 15 server-side functions that client components can call directly without building a separate HTTP endpoint. In OASIS Seguros, nearly all business operations — creating and transitioning policies, recording payments, creating clients, and searching — are implemented as Server Actions. Each action is created via the `createServerAction` factory utility, which transparently enforces session authentication, validates input with Zod, injects a typed `UserContext`, handles `AppError` mapping, and revalidates Next.js cache paths on success.
+
+## Standard Response Type
+
+Every Server Action returns an `ActionResponse<T>` union type:
+
+```typescript
+type ActionResponse<T> =
+  | {
+      success: true;
+      data: T;
+      message?: string;
+    }
+  | {
+      success: false;
+      error: string;
+      fieldErrors?: Record<string, string[]>;
+      statusCode?: number;
+    };
+```
+
+When `success` is `false`, the `error` string contains a human-readable message. For Zod validation failures, `fieldErrors` is populated with a map of field name to array of error messages. The `statusCode` mirrors HTTP semantics (`400`, `401`, `403`, `404`, `409`, `500`).
+
+<Note>
+  Server Actions are Next.js-native and cannot be called from external HTTP clients. They run server-side and automatically read the session context from the incoming request headers — no Authorization header is required from the calling component.
+</Note>
+
+---
+
+## Policy Actions
+
+Defined in `src/lib/actions/policy.actions.ts`. Import from `@/lib/actions/policy.actions`.
+
+### `createPolicy(data)`
+
+Creates a new insurance policy. Validates that the referenced `client_id` and `insurer_id` exist. If the policy is created directly in `VIGENTE` status, a payment schedule is automatically generated. On success, revalidates `/dashboard/polizas`.
+
+**Input — `CreatePolicySchema`:**
+
+<ParamField body="policy_number" type="string" required>
+  Policy number. Minimum 3 characters.
+</ParamField>
+
+<ParamField body="policy_type" type="string" required>
+  Type of policy (e.g. `Vida`, `Vehicular`, `Salud`). Minimum 3 characters.
+</ParamField>
+
+<ParamField body="client_id" type="string" required>
+  UUID of the client this policy belongs to.
+</ParamField>
+
+<ParamField body="insurer_id" type="string" required>
+  UUID of the insurance company underwriting the policy.
+</ParamField>
+
+<ParamField body="start_date" type="string" required>
+  Policy start date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField body="end_date" type="string" required>
+  Policy end date in `YYYY-MM-DD` format. Must be after `start_date`.
+</ParamField>
+
+<ParamField body="payment_frequency" type="string" required>
+  Payment cadence. One of `mensual` | `trimestral` | `semestral` | `anual`.
+</ParamField>
+
+<ParamField body="annual_premium" type="number" required>
+  Annual premium amount. Must be a positive number.
+</ParamField>
+
+<ParamField body="monthly_premium" type="number">
+  Monthly premium amount. Must be a positive number.
+</ParamField>
+
+<ParamField body="coverage_limit" type="number">
+  Maximum coverage amount. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="deductible" type="number">
+  Deductible amount. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="policy_holder_name" type="string">
+  Full name of the insured person or entity.
+</ParamField>
+
+<ParamField body="product_name" type="string">
+  Commercial product name (e.g. `Seguro de Vida Plus`).
+</ParamField>
+
+<ParamField body="description" type="string">
+  Free-form description of the policy.
+</ParamField>
+
+<ParamField body="insured_object_description" type="string">
+  Description of the insured object (vehicle plate, property address, etc.).
+</ParamField>
+
+<ParamField body="renewal_date" type="string">
+  Scheduled renewal date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField body="beneficiaries" type="object | array">
+  Beneficiary information as a JSON object or array.
+</ParamField>
+
+<ParamField body="special_conditions" type="object | array">
+  Special policy conditions as a JSON object or array.
+</ParamField>
+
+**Returns:** `ActionResponse<PolicyResponse>`
+
+---
+
+### `renewPolicy(id, data)`
+
+Updates an existing policy — commonly used as part of a renewal workflow. Accepts any subset of `UpdatePolicySchema` fields. Revalidates `/dashboard/polizas` and `/polizas/[id]` on success.
+
+**Parameters:**
+
+<ParamField path="id" type="string" required>
+  UUID of the policy to update.
+</ParamField>
+
+**Input — `UpdatePolicySchema`** (all fields optional):
+
+All fields from `CreatePolicySchema` are accepted as optional updates, plus:
+
+<ParamField body="status" type="string">
+  One of `COTIZADA` | `EN_TRAMITE` | `PENDIENTE_PAGO` | `VIGENTE` | `CANCELADA` | `NO_RENOVADA` | `SUSPENDIDA`.
+</ParamField>
+
+<ParamField body="issue_date" type="string | Date">
+  Official issue date of the policy document.
+</ParamField>
+
+<ParamField body="total_paid" type="number">
+  Running total of amounts paid. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="outstanding_balance" type="number">
+  Remaining balance due. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="last_payment_date" type="string | Date">
+  Date of the most recent payment received.
+</ParamField>
+
+**Returns:** `ActionResponse<PolicyResponse>`
+
+---
+
+## Policy State Transition Actions
+
+These actions are defined directly on the `PolicyService` and called from server components or dedicated action wrappers. Each enforces a strict state machine — passing an invalid `status` throws an `AppError` with HTTP 400.
+
+### `submitForApproval(id, userContext)`
+
+Moves a policy from **COTIZADA → EN_TRAMITE**.
+
+<ParamField path="id" type="string" required>
+  UUID of the policy. Must be in `COTIZADA` status.
+</ParamField>
+
+**Returns:** `Policy`
+
+**Throws:** `AppError(400)` if policy is not in `COTIZADA` status.
+
+---
+
+### `approvePolicy(id, userContext)`
+
+Moves a policy from **EN_TRAMITE → PENDIENTE_PAGO**.
+
+<ParamField path="id" type="string" required>
+  UUID of the policy. Must be in `EN_TRAMITE` status.
+</ParamField>
+
+**Returns:** `Policy`
+
+**Throws:** `AppError(400)` if policy is not in `EN_TRAMITE` status.
+
+---
+
+### `activatePolicy(id, data, userContext)`
+
+Moves a policy from **PENDIENTE_PAGO or EN_TRAMITE → VIGENTE**. On activation:
+- A payment schedule is automatically generated via `PaymentService.generateSchedule()`.
+- If the associated client is in `pendiente` status, they are automatically transitioned to `activo` (Commercial Onboarding phase).
+
+<ParamField path="id" type="string" required>
+  UUID of the policy. Must be in `PENDIENTE_PAGO` or `EN_TRAMITE` status.
+</ParamField>
+
+<ParamField body="policy_number" type="string">
+  Final policy number to assign upon activation.
+</ParamField>
+
+<ParamField body="issue_date" type="string">
+  Official issue date in `YYYY-MM-DD` format.
+</ParamField>
+
+**Returns:** `Policy`
+
+**Throws:** `AppError(400)` if policy is not in a valid activation state.
+
+---
+
+### `cancelPolicy(id, userContext)`
+
+Cancels a policy from any state, setting it to **CANCELADA**. Records cancellation metadata including `reason`, `cancelledBy`, and `cancelledAt`.
+
+<ParamField path="id" type="string" required>
+  UUID of the policy to cancel.
+</ParamField>
+
+**Returns:** `Policy`
+
+---
+
+### `renewPolicy(id, userContext)` *(service-level)*
+
+Creates a brand-new policy as a renewal of the original. The new policy:
+- Starts the day after the original `end_date`.
+- Ends one year after its `start_date`.
+- Has a `policy_number` of format `<original_number>-R<year>`.
+- Inherits `client_id`, `insurer_id`, premium amounts, and payment frequency.
+
+The original policy is then marked **NO_RENOVADA**.
+
+<ParamField path="id" type="string" required>
+  UUID of the policy to renew.
+</ParamField>
+
+**Returns:** `Policy` (the newly created renewal policy)
+
+---
+
+## Payment Actions
+
+Defined in `src/lib/actions/payment.actions.ts`. Import from `@/lib/actions/payment.actions`.
+
+### `listPayments(params)`
+
+Lists payments with filters, full-text search, and pagination. Results are ABAC-scoped: users with the `agente` role only see payments for policies belonging to their assigned clients.
+
+**Input — `PaymentListParamsSchema`:**
+
+<ParamField body="page" type="number">
+  Page number (1-based). Defaults to `1`.
+</ParamField>
+
+<ParamField body="limit" type="number">
+  Items per page. Maximum `100`. Defaults to `10`.
+</ParamField>
+
+<ParamField body="status" type="array">
+  Filter by payment status. Array of `pendiente` | `pagado` | `vencido` | `parcial` | `rechazado` | `cancelado`.
+</ParamField>
+
+<ParamField body="policyId" type="string">
+  UUID — filter payments for a specific policy.
+</ParamField>
+
+<ParamField body="dateFrom" type="string">
+  ISO date string — lower bound for `paymentDate`.
+</ParamField>
+
+<ParamField body="dateTo" type="string">
+  ISO date string — upper bound for `paymentDate`.
+</ParamField>
+
+<ParamField body="q" type="string">
+  Full-text search across `paymentReference`, `receiptNumber`, `payerName`, `policyNumber`, and client name/email (case-insensitive).
+</ParamField>
+
+**Returns:** `ActionResponse<PaymentListResponseDTO>`
+
+---
+
+## Client Actions
+
+Defined in `src/lib/actions/client.actions.ts`. Import from `@/lib/actions/client.actions`.
+
+### `createClient(data)`
+
+Creates a new client. Validates uniqueness of `cedula`, `ruc`, and `email`. The client is created with `status: 'pendiente'` and transitions to `activo` automatically when their first policy is activated. Revalidates `/dashboard/clientes` on success.
+
+**Input — `CreateClientSchema`:**
+
+<ParamField body="tipoCliente" type="string" required>
+  Client type: `natural` (individual) or `juridica` (company). Defaults to `natural`.
+</ParamField>
+
+<ParamField body="nombre" type="string">
+  First name. Required when `tipoCliente` is `natural`. Minimum 2 characters.
+</ParamField>
+
+<ParamField body="apellido" type="string">
+  Last name. Required when `tipoCliente` is `natural`. Minimum 2 characters.
+</ParamField>
+
+<ParamField body="cedula" type="string">
+  Ecuadorian national ID. Required when `tipoCliente` is `natural`. Validated via Ecuadorian ID algorithm.
+</ParamField>
+
+<ParamField body="razonSocial" type="string">
+  Company legal name. Required when `tipoCliente` is `juridica`. Minimum 2 characters.
+</ParamField>
+
+<ParamField body="ruc" type="string">
+  Ecuadorian RUC (tax ID). Required when `tipoCliente` is `juridica`. Validated via RUC algorithm.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Client email address. Must be unique across all clients.
+</ParamField>
+
+<ParamField body="telefono" type="string">
+  Ecuadorian mobile number in format `09xxxxxxxx`.
+</ParamField>
+
+<ParamField body="direccion" type="string">
+  Physical address. Minimum 8 characters.
+</ParamField>
+
+<ParamField body="assignedAgentId" type="string">
+  UUID of the agent assigned to manage this client. Optional.
+</ParamField>
+
+**Returns:** `ActionResponse<ClienteResponse>`
+
+---
+
+## Search Actions
+
+Defined in `src/lib/actions/search.actions.ts`. Import from `@/lib/actions/search.actions`.
+
+### `searchClients(query)`
+
+Searches for clients by name, email, cédula, or RUC. Returns the first 10 matching clients serialized for client-side consumption (Dates and Prisma Decimals converted to JSON primitives).
+
+<ParamField body="query" type="string" required>
+  Search string. Matched case-insensitively across client name fields, email, cédula, and RUC.
+</ParamField>
+
+**Returns:** Serialized array of up to 10 `Cliente` objects.
+
+<Tip>
+  `searchClients` does not use the `createServerAction` factory — it is a plain `'use server'` function and does not enforce authentication. Use it in contexts where the surrounding page already guarantees a session (e.g. inside `/dashboard` routes protected by middleware).
+</Tip>
+
+---
+
+## Calling Server Actions from a Client Component
+
+```typescript
+'use client';
+
+import { createPolicy } from '@/lib/actions/policy.actions';
+
+async function handleSubmit() {
+  const result = await createPolicy({
+    policy_number: 'POL-2025-001',
+    client_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    insurer_id: 'b2c3d4e5-f6a7-8901-bcde-f01234567891',
+    policy_type: 'Vida',
+    product_name: 'Seguro de Vida Plus',
+    start_date: '2025-01-01',
+    end_date: '2026-01-01',
+    annual_premium: 1200.00,
+    monthly_premium: 100.00,
+    payment_frequency: 'mensual',
+    policy_holder_name: 'Juan Pérez',
+  });
+
+  if (result.success) {
+    console.log('Policy created:', result.data.policyNumber);
+  } else {
+    console.error('Error:', result.error);
+    if (result.fieldErrors) {
+      // e.g. { end_date: ['La fecha de fin debe ser posterior a la fecha de inicio'] }
+      console.error('Field errors:', result.fieldErrors);
+    }
+  }
+}
+```

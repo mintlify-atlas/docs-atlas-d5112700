@@ -1,0 +1,381 @@
+---
+title: "OASIS Seguros Database Schema and Prisma Models"
+sidebarTitle: "Database Schema"
+description: "Multi-schema PostgreSQL database design for OASIS Seguros: schemas, core models, relationships, enums, and migration workflow."
+---
+
+OASIS Seguros uses a single PostgreSQL 15 instance partitioned into eight logical schemas. Rather than prefixing every table (e.g., `auth_user`, `clients_client`) or spinning up separate databases per domain, PostgreSQL schemas give each business subdomain its own namespace with clear ownership boundaries while keeping all foreign-key relationships within one engine and one Prisma data source. Prisma's `multiSchema` preview feature is enabled to support this layout.
+
+```prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["audit", "auth", "blockchain", "claims",
+               "clients", "insurance", "notifications", "payments"]
+}
+```
+
+## Schema Layout
+
+| Schema | Models | Purpose |
+|---|---|---|
+| `auth` | User, Session, Account, Verification, Role, UserRole, RefreshToken | Authentication (Better-Auth) and role-based access control |
+| `clients` | Client, ContactMethod, Address | Client profiles, contact details, and physical addresses |
+| `insurance` | Policy, Insurer, CoverageType, PolicyCoverage | Policy lifecycle, insurer registry, and coverage configuration |
+| `payments` | Payment, PaymentHistory | Payment records, partial payments, and status-change audit trail |
+| `claims` | Claim, ClaimHistory | Siniestro (claim) registration, approval workflow, and history |
+| `notifications` | Notification, Document, EmailLog, SmsLog, ReminderConfig, JobExecution | All outbound communications, document storage, and pg-boss job tracking |
+| `audit` | AuditLogSuccess, AuditLogError, AuditConfig | Full audit trail for every data operation and configuration change |
+| `blockchain` | BlockchainTransaction | On-chain payment records including gas details and smart-contract parameters |
+
+## Core Models
+
+### `Client` (schema: `clients`)
+
+Stores both natural persons and legal entities. The `clientType` discriminator drives which identity fields are populated.
+
+```prisma
+model Client {
+  id                String       @id @default(uuid()) @db.Uuid
+  clientType        ClientType   @map("client_type")       // natural | juridica
+  firstName         String?      @map("first_name")
+  lastName          String?      @map("last_name")
+  cedula            String?      @unique                    // national ID (natural)
+  companyName       String?      @map("company_name")
+  ruc               String?      @unique                    // tax ID (juridica)
+  email             String?
+  status            ClientStatus @default(pendiente)
+  dateOfBirth       DateTime?    @db.Date
+  profession        String?
+  annualIncome      Decimal?     @db.Decimal(15, 2)
+  riskProfile       String?
+  totalPolicies     Int          @default(0)
+  totalPaymentsMade Decimal      @default(0) @db.Decimal(15, 2)
+  assignedAgentId   String?      @db.Uuid                  // FK → auth.user
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  deletedAt         DateTime?                               // soft-delete
+
+  // Relations
+  policies          Policy[]
+  contactMethods    ContactMethod[]
+  addresses         Address[]
+  claims            Claim[]
+  notifications     Notification[]
+  emailLogs         EmailLog[]
+  smsLogs           SmsLog[]
+
+  @@index([assignedAgentId])
+  @@index([email])
+  @@index([cedula])
+  @@schema("clients")
+}
+```
+
+<Tip>
+  The `assignedAgentId` field links a client to an agent in the `auth.user` table. All queries scoped to the `agente` role filter by this field to enforce data isolation between agents.
+</Tip>
+
+### `Policy` (schema: `insurance`)
+
+The central entity of the platform. Policies progress through a lifecycle from quotation to active coverage, tracked via the `PolicyStatus` enum.
+
+```prisma
+model Policy {
+  id                       String        @id @default(uuid()) @db.Uuid
+  policyNumber             String        @map("policy_number")
+  clientId                 String        @db.Uuid              // FK → clients.client
+  insurerId                String        @db.Uuid              // FK → insurance.insurer
+  policyType               String        @map("policy_type")
+  productName              String?
+  status                   PolicyStatus  @default(COTIZADA)
+  issueDate                DateTime      @db.Date
+  startDate                DateTime      @db.Date
+  endDate                  DateTime      @db.Date
+  renewalDate              DateTime?     @db.Date
+  annualPremium            Decimal       @db.Decimal(15, 2)
+  paymentFrequency         FrequencyType @default(mensual)
+  monthlyPremium           Decimal?      @db.Decimal(15, 2)
+  coverageLimit            Decimal?      @db.Decimal(15, 2)
+  deductible               Decimal?      @db.Decimal(15, 2)
+  policyHolderName         String?
+  insuredObjectDescription String?
+  totalPaid                Decimal       @default(0) @db.Decimal(15, 2)
+  outstandingBalance       Decimal?      @db.Decimal(15, 2)
+  lastPaymentDate          DateTime?     @db.Date
+  nextPaymentDate          DateTime?     @db.Date
+  daysOverdue              Int           @default(0)
+  specialConditions        Json?
+  beneficiaries            Json?
+
+  // Relations
+  payments                 Payment[]
+  policyCoverages          PolicyCoverage[]
+  claims                   Claim[]
+
+  @@unique([policyNumber, insurerId])
+  @@index([clientId])
+  @@index([status])
+  @@schema("insurance")
+}
+```
+
+### `Payment` (schema: `payments`)
+
+Tracks every individual payment instalment. The model supports conventional payment methods as well as blockchain (cryptocurrency) transactions.
+
+```prisma
+model Payment {
+  id                        String         @id @default(uuid()) @db.Uuid
+  policyId                  String         @db.Uuid              // FK → insurance.policy
+  paymentReference          String         @unique               // human-readable ref
+  paymentDate               DateTime?      @db.Date
+  paymentMethod             PaymentMethod?
+  paymentStatus             PaymentStatus  @default(pendiente)
+  dueDate                   DateTime       @db.Date
+  amountDue                 Decimal        @db.Decimal(15, 2)
+  amountPaid                Decimal        @default(0) @db.Decimal(15, 2)
+  amountRemaining           Decimal?       @db.Decimal(15, 2)
+  currencyCode              String         @default("USD") @db.VarChar(3)
+  paymentGatewayReference   String?
+  paymentGatewayResponse    Json?
+  payerName                 String?
+  receiptNumber             String?
+  isAutomaticPayment        Boolean        @default(false)
+  retryCount                Int            @default(0)
+  blockchainTransactionHash String?        @db.VarChar(255)
+  qrCodeData                String?
+  paymentDaysLate           Int            @default(0)
+  deletedAt                 DateTime?                            // soft-delete
+
+  // Relations
+  paymentHistory            PaymentHistory[]
+  blockchainTransactions    BlockchainTransaction[]
+
+  @@index([policyId])
+  @@index([paymentStatus])
+  @@index([dueDate])
+  @@schema("payments")
+}
+```
+
+### `User` (schema: `auth`)
+
+Better-Auth manages the `auth` schema directly. The `User` model is extended with business fields (`phone`, `cedula`, `isActive`, `mfaEnabled`, `lastLoginAt`) so that agent and admin profiles are fully represented without a separate profile table.
+
+```prisma
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  email         String    @unique
+  name          String?
+  emailVerified Boolean   @default(false)
+  role          String    @default("user")
+  phone         String?
+  firstName     String?
+  lastName      String?
+  cedula        String?   @unique
+  isActive      Boolean   @default(true)
+  mfaEnabled    Boolean   @default(false)
+  lastLoginAt   DateTime?
+  passwordHash  String?
+  deletedAt     DateTime?
+
+  // Better-Auth relations
+  sessions      Session[]
+  accounts      Account[]
+  refreshTokens RefreshToken[]
+  userRoles     UserRole[]
+
+  @@schema("auth")
+}
+```
+
+## Enums
+
+All enums are scoped to their owning schema.
+
+### `ClientStatus` — `clients` schema
+
+| Value | Meaning |
+|---|---|
+| `pendiente` | Client registered but no active policy yet |
+| `activo` | Has at least one `VIGENTE` policy |
+| `inactivo` | No active policies, no outstanding debt |
+| `moroso` | Has overdue payments |
+| `eliminado` | Soft-deleted |
+
+### `PolicyStatus` — `insurance` schema
+
+| Value | Meaning |
+|---|---|
+| `COTIZADA` | Quoted — initial state after creation |
+| `EN_TRAMITE` | Submitted to insurer for processing |
+| `PENDIENTE_PAGO` | Approved by insurer, awaiting first payment |
+| `VIGENTE` | Active and in force |
+| `CANCELADA` | Cancelled — terminal state |
+| `NO_RENOVADA` | Expired without renewal — terminal state |
+| `SUSPENDIDA` | Temporarily suspended |
+
+### `PaymentStatus` — `payments` schema
+
+| Value | Meaning |
+|---|---|
+| `pendiente` | Scheduled but not yet due or paid |
+| `verificando` | Payment received, being verified |
+| `pagado` | Fully paid |
+| `vencido` | Past due date without payment |
+| `parcial` | Partially paid |
+| `rechazado` | Payment rejected |
+| `cancelado` | Payment cancelled |
+
+### `PaymentMethod` — `payments` schema
+
+| Value | Meaning |
+|---|---|
+| `transferencia` | Bank transfer |
+| `tarjeta_credito` | Credit card |
+| `efectivo` | Cash |
+| `cheque` | Cheque |
+| `automatico` | Automatic/scheduled debit |
+| `cripto` | Cryptocurrency (linked to `blockchain.transaction`) |
+
+### `UserRoleEnum` — `auth` schema
+
+| Value | Permissions scope |
+|---|---|
+| `admin` | Full system access |
+| `agente` | Own clients and policies only |
+| `cliente` | Read-only access to own records |
+| `supervisor` | Read/write across all agents |
+| `auditor` | Read-only access to audit logs |
+| `operador` | Operational tasks (payments, notifications) |
+
+### `FrequencyType` — `insurance` schema
+
+| Value | Billing cycle |
+|---|---|
+| `mensual` | Monthly |
+| `trimestral` | Quarterly |
+| `semestral` | Semi-annual |
+| `anual` | Annual |
+
+### `ClaimStatus` — `claims` schema
+
+| Value | Meaning |
+|---|---|
+| `registrado` | Claim filed |
+| `en_revision` | Under review |
+| `aprobado` | Approved for payout |
+| `rechazado` | Rejected |
+| `pagado` | Indemnity paid |
+| `cerrado` | Case closed |
+
+### Additional Enums
+
+<Info>
+  The schema also defines `NotificationChannel` (`email`, `sms`, `whatsapp`, `notificacion_app`, `carta`), `NotificationStatus` (`pendiente`, `enviado`, `entregado`, `fallido`, `no_aplica`), `ErrorSeverity` (`low`, `medium`, `high`, `critical`), and `JobStatus` (`running`, `completed`, `failed`, `partial`) used by the notifications and audit schemas.
+</Info>
+
+## Key Relationships
+
+```
+auth.user
+  ├──< clients.client (assignedAgentId)   — agent owns clients
+  └──< auth.user_role                     — RBAC assignments
+
+clients.client
+  ├──< insurance.policy                   — client has policies
+  ├──< clients.contact_method
+  ├──< clients.address
+  ├──< claims.claim
+  └──< notifications.*                    — email/sms logs, notifications
+
+insurance.policy
+  ├──< payments.payment                   — policy has payment instalments
+  ├──< insurance.policy_coverage          — many-to-many with coverage_type
+  └──< claims.claim
+
+payments.payment
+  ├──< payments.payment_history           — status-change audit trail
+  └──< blockchain.transaction             — on-chain payment proof
+```
+
+## Migration Workflow
+
+<Warning>
+  Always run `db:generate` after modifying `schema.prisma` to keep the Prisma client in sync before running migrations.
+</Warning>
+
+<Steps>
+  <Step title="Generate Prisma client">
+    Regenerates the type-safe client from the current schema. Run this after every schema change.
+
+    ```bash
+    npm run db:generate
+    ```
+  </Step>
+
+  <Step title="Run migrations (production-safe)">
+    Creates SQL migration files and applies them to the database. Safe for staging and production environments.
+
+    ```bash
+    npm run db:migrate
+    ```
+  </Step>
+
+  <Step title="Push schema (development only)">
+    Pushes schema changes directly without creating migration files. Use only in local development when you want to iterate quickly.
+
+    ```bash
+    npm run db:push
+    ```
+  </Step>
+
+  <Step title="Open Prisma Studio">
+    Launches the Prisma Studio web UI for browsing and editing records directly in the database.
+
+    ```bash
+    npm run db:studio
+    ```
+  </Step>
+
+  <Step title="Seed sample data">
+    Populates the database with realistic sample clients, policies, payments, and reference data.
+
+    ```bash
+    npm run db:seed
+    ```
+  </Step>
+
+  <Step title="Heavy seed for load testing">
+    Inserts 2,500+ clients with associated policies and payments. Use this to validate query performance and pagination before deploying to production.
+
+    ```bash
+    npm run db:seed:heavy
+    ```
+  </Step>
+</Steps>
+
+When running inside Docker, prefix any command with `docker-compose exec web`:
+
+```bash
+docker-compose exec web npm run db:migrate
+docker-compose exec web npm run db:seed:heavy
+```
+
+<CardGroup cols={2}>
+  <Card
+    title="Architecture Overview"
+    icon="sitemap"
+    href="/architecture/overview"
+  >
+    System diagram, component table, and key technology decisions.
+  </Card>
+  <Card
+    title="Clean Architecture"
+    icon="layer-group"
+    href="/architecture/clean-architecture"
+  >
+    Domain entities, repository interfaces, and how layers communicate.
+  </Card>
+</CardGroup>

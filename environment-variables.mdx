@@ -1,0 +1,213 @@
+---
+title: "Configure OASIS Seguros Environment Variables"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for all OASIS Seguros environment variables including database, auth, Redis, email, and SMS configuration."
+---
+
+OASIS Seguros reads its configuration exclusively from environment variables at runtime. In local and Docker development the variables live in `app/.env`; in production they are injected via `docker-compose.prod.yml` or your platform's secret manager. This page documents every variable, its purpose, and whether it is required or optional.
+
+<Warning>
+  **`BETTER_AUTH_SECRET` must be at least 32 characters long.** In production, generate a cryptographically random value and treat it as you would a private key — rotate it deliberately, never commit it to source control, and store it in a secret manager.
+
+  ```bash
+  # Recommended: generate a 64-character base64 secret
+  openssl rand -base64 64
+  ```
+</Warning>
+
+## Required Variables
+
+These four variables must be present for the application to start. Missing any of them will cause the boot sequence to fail.
+
+<ParamField body="DATABASE_URL" type="string" required>
+  PostgreSQL connection string used by Prisma for all application queries. Must point to a PostgreSQL 14+ instance.
+
+  ```
+  postgresql://oasis_user:oasis_password@localhost:5432/oasis_db
+  ```
+
+  In Docker Compose the value is automatically set to use the internal `db` service hostname:
+  `postgres://oasis_user:oasis_password@db:5432/oasis_db`
+</ParamField>
+
+<ParamField body="REDIS_URL" type="string" required>
+  Redis connection string used for session storage and background job queuing via pg-boss.
+
+  ```
+  redis://localhost:6379
+  ```
+
+  In Docker Compose this resolves to `redis://redis:6379` using the internal network.
+</ParamField>
+
+<ParamField body="BETTER_AUTH_SECRET" type="string" required>
+  Secret key used by Better-Auth to sign and verify session tokens. Must be **at least 32 characters**. In production, use a base64-encoded random value of 64+ characters.
+
+  ```
+  # Development (minimum viable, not for production)
+  BETTER_AUTH_SECRET=dev-secret-key-minimum-32-characters
+
+  # Production (generate with: openssl rand -base64 64)
+  BETTER_AUTH_SECRET=<64-char-base64-string>
+  ```
+</ParamField>
+
+<ParamField body="NODE_ENV" type="string" required>
+  Runtime environment flag consumed by Next.js and application code. Accepted values: `development` or `production`.
+
+  Setting this to `production` enables Next.js build optimisations, disables verbose error pages, and activates stricter security defaults in Better-Auth.
+</ParamField>
+
+---
+
+## Application URLs
+
+<ParamField body="NEXT_PUBLIC_APP_URL" type="string">
+  The public-facing base URL of the application. Used to construct absolute links in emails, notifications, and OAuth redirect URIs.
+
+  ```
+  # Local development
+  NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+  # Production
+  NEXT_PUBLIC_APP_URL=https://yourdomain.com
+  ```
+</ParamField>
+
+<ParamField body="NEXT_PUBLIC_BETTER_AUTH_URL" type="string">
+  Base URL for the Better-Auth service endpoints (`/api/auth/*`). In a standard single-server deployment this is identical to `NEXT_PUBLIC_APP_URL`.
+
+  ```
+  NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:3000
+  ```
+</ParamField>
+
+<ParamField body="DIRECT_URL" type="string">
+  A direct (non-pooled) PostgreSQL connection string used by Prisma Migrate when applying schema migrations. In most deployments this is the same value as `DATABASE_URL`. It becomes important when `DATABASE_URL` points to a connection pooler (e.g. PgBouncer) that does not support DDL statements.
+
+  ```
+  DIRECT_URL=postgresql://oasis_user:oasis_password@localhost:5432/oasis_db
+  ```
+</ParamField>
+
+---
+
+## Email (Optional)
+
+At least one email transport must be configured to enable notification delivery. OASIS Seguros supports both Resend (API key) and a standard SMTP server. If neither is configured, email notifications are silently skipped and logged.
+
+<ParamField body="RESEND_API_KEY" type="string">
+  API key for the [Resend](https://resend.com) email delivery service. When set, Resend is used as the primary email transport.
+
+  ```
+  RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
+  ```
+</ParamField>
+
+<ParamField body="SMTP_HOST" type="string">
+  Hostname of the SMTP mail server (e.g. `smtp.gmail.com`, `smtp.mailgun.org`). Required when using SMTP transport instead of Resend.
+</ParamField>
+
+<ParamField body="SMTP_PORT" type="number">
+  SMTP port number. Typical values are `587` (STARTTLS) or `465` (SSL/TLS).
+</ParamField>
+
+<ParamField body="SMTP_USER" type="string">
+  SMTP authentication username, usually an email address.
+</ParamField>
+
+<ParamField body="SMTP_PASS" type="string">
+  SMTP authentication password or app-specific password.
+</ParamField>
+
+<ParamField body="EMAIL_FROM" type="string">
+  The sender address that appears in the `From:` header of all outgoing emails.
+
+  ```
+  EMAIL_FROM=noreply@yourdomain.com
+  ```
+</ParamField>
+
+---
+
+## SMS / Twilio (Optional)
+
+All three Twilio variables must be present together to enable SMS notifications. If any one of them is missing, SMS delivery is disabled.
+
+<ParamField body="TWILIO_ACCOUNT_SID" type="string">
+  Your Twilio account SID, found in the Twilio Console dashboard. Begins with `AC`.
+
+  ```
+  TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  ```
+</ParamField>
+
+<ParamField body="TWILIO_AUTH_TOKEN" type="string">
+  Twilio auth token used to authenticate API requests. Found alongside the Account SID in the Twilio Console. Treat this as a password.
+</ParamField>
+
+<ParamField body="TWILIO_PHONE_NUMBER" type="string">
+  The Twilio phone number from which SMS messages are sent. Must be in **E.164 format**.
+
+  ```
+  TWILIO_PHONE_NUMBER=+1234567890
+  ```
+</ParamField>
+
+---
+
+## Sample `.env` File
+
+A complete development environment file with all variables:
+
+```bash
+# =============================================================================
+# OASIS Seguros — Environment Variables
+# Copy this file to .env and fill in your values.
+# Never commit a .env file with real credentials to source control.
+# =============================================================================
+
+# ── Database ──────────────────────────────────────────────────────────────────
+DATABASE_URL=postgresql://oasis_user:oasis_password@localhost:5432/oasis_db
+DIRECT_URL=postgresql://oasis_user:oasis_password@localhost:5432/oasis_db
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+REDIS_URL=redis://localhost:6379
+
+# ── Auth (required — min 32 chars) ───────────────────────────────────────────
+# Generate with: openssl rand -base64 64
+BETTER_AUTH_SECRET=your-cryptographically-random-secret-minimum-32-characters
+
+# ── Application URLs ──────────────────────────────────────────────────────────
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:3000
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+NODE_ENV=development
+
+# ── Email — Resend (optional) ─────────────────────────────────────────────────
+RESEND_API_KEY=
+
+# ── Email — SMTP (optional, alternative to Resend) ───────────────────────────
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+EMAIL_FROM=noreply@yourdomain.com
+
+# ── SMS — Twilio (optional) ───────────────────────────────────────────────────
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_PHONE_NUMBER=
+```
+
+<Tip>
+  For production deployments, use `docker-compose.prod.yml` instead of the default `docker-compose.yml`. The production Compose file reads all sensitive variables from the host environment or a `.env.production` file, does **not** expose the PostgreSQL or Redis ports to the host network, enforces memory and CPU limits on every service, and uses the production-optimised `Dockerfile.prod` image.
+
+  ```bash
+  # Start the full production stack
+  docker-compose -f docker-compose.prod.yml up -d
+  ```
+
+  See `.env.production.example` at the repository root for a production-specific template with commented guidance on each value.
+</Tip>

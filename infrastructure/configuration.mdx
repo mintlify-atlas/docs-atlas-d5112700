@@ -1,0 +1,211 @@
+---
+title: "System Configuration and Reminder Settings"
+sidebarTitle: "Configuration"
+description: "How to manage OASIS Seguros system configuration including notification reminder rules, channel toggles, and the audit trail for all config changes."
+---
+
+OASIS Seguros stores all adjustable system parameters — notification timing, channel toggles, and other operational settings — as `SystemConfiguration` records in the database rather than hard-coded values. The `ConfigurationService` class is the single point of access for reading and writing these records, enforcing validation rules and writing a full audit trail for every change. The configuration UI is available at `/configuracion` for authenticated users.
+
+## Configuration Architecture
+
+<CardGroup cols={2}>
+  <Card title="Database-backed" icon="database">
+    All settings live in the database as `SystemConfiguration` records, so changes take effect immediately without a redeploy or restart.
+  </Card>
+  <Card title="Category-grouped" icon="folder">
+    Configurations are organized by `category`, making it easy to retrieve a related group of settings in one query.
+  </Card>
+  <Card title="Key-value model" icon="key">
+    Each record has a unique `key` string. The `value` field is flexible (`unknown`) to support booleans, numbers, strings, and nested objects.
+  </Card>
+  <Card title="Audit trail" icon="clock-rotate-left">
+    Every update is recorded in `audit.audit_config` with the old value, new value, the user who made the change, and a timestamp.
+  </Card>
+</CardGroup>
+
+## Reminder Configuration
+
+The most commonly adjusted setting is the payment reminder configuration, which controls when and how OASIS Seguros contacts clients before a payment is due.
+
+### ReminderConfig Interface
+
+```typescript
+interface ReminderConfig {
+  daysBeforeDue: number;   // Days before due date to send the reminder
+  sendTime: string;        // Time of day in HH:MM format, e.g. "08:00"
+  emailEnabled: boolean;   // Enable the email notification channel
+  smsEnabled: boolean;     // Enable the SMS notification channel
+  isActive: boolean;       // Master switch for the reminder system
+}
+```
+
+### Validation Rules
+
+<Info>
+  At least one communication channel must be enabled. Calling `updateReminderConfig` with both `emailEnabled: false` and `smsEnabled: false` throws a `400 AppError`:
+
+  > "Debe habilitar al menos un canal de comunicación (email o SMS)"
+</Info>
+
+## ConfigurationService Methods
+
+All methods are on the `ConfigurationService` class, which receives an `IConfigurationRepository` via constructor injection from the DI container.
+
+### getReminderConfig
+
+Returns the current reminder configuration.
+
+```typescript
+async getReminderConfig(): Promise<ReminderConfig>
+```
+
+**Example:**
+
+```typescript
+const config = await configurationService.getReminderConfig();
+// { daysBeforeDue: 7, sendTime: "08:00", emailEnabled: true, smsEnabled: false, isActive: true }
+```
+
+---
+
+### updateReminderConfig
+
+Updates reminder settings. Accepts camelCase or snake_case field names for API flexibility. Requires a valid `userContext` with an `id` — unauthenticated calls throw a `401 AppError`.
+
+```typescript
+async updateReminderConfig(
+  data: UpdateReminderConfigInput,
+  userContext: UserContext | null
+): Promise<ReminderConfig>
+```
+
+`UpdateReminderConfigInput` accepts both naming conventions:
+
+```typescript
+interface UpdateReminderConfigInput {
+  daysBeforeDue?: number;      // or days_before_due
+  sendTime?: string;           // or send_time
+  emailEnabled?: boolean;      // or email_enabled
+  smsEnabled?: boolean;        // or sms_enabled
+}
+```
+
+**Example — update reminder to 7 days with email only:**
+
+```typescript
+import { configurationService } from '@/lib/core/container';
+import { getSession } from '@/lib/auth';
+
+const session = await getSession();
+
+const updated = await configurationService.updateReminderConfig(
+  {
+    daysBeforeDue: 7,
+    sendTime: "08:00",
+    emailEnabled: true,
+    smsEnabled: false,
+  },
+  { id: session.user.id }
+);
+```
+
+---
+
+### getAllConfigurations
+
+Returns all active `SystemConfiguration` records across every category.
+
+```typescript
+async getAllConfigurations(): Promise<SystemConfiguration[]>
+```
+
+---
+
+### getConfigurationsByCategory
+
+Filters configurations by their `category` field. Useful for retrieving a logical group of related settings.
+
+```typescript
+async getConfigurationsByCategory(category: string): Promise<SystemConfiguration[]>
+```
+
+**Example:**
+
+```typescript
+const notifConfigs = await configurationService.getConfigurationsByCategory('notifications');
+```
+
+---
+
+### getConfigurationByKey
+
+Retrieves a single configuration record by its unique key. Returns `null` if no record with that key exists.
+
+```typescript
+async getConfigurationByKey(key: string): Promise<SystemConfiguration | null>
+```
+
+**Example:**
+
+```typescript
+const config = await configurationService.getConfigurationByKey('reminder.daysBeforeDue');
+```
+
+---
+
+### updateConfiguration
+
+General-purpose update for any system configuration record. Requires authentication and throws `404` if the key does not exist.
+
+```typescript
+async updateConfiguration(
+  key: string,
+  data: UpdateConfigurationInput,
+  userContext: UserContext | null
+): Promise<SystemConfiguration>
+```
+
+```typescript
+interface UpdateConfigurationInput {
+  value?: unknown;
+  description?: string;
+  category?: string;
+  is_active?: boolean;
+}
+```
+
+**Example:**
+
+```typescript
+const updated = await configurationService.updateConfiguration(
+  'feature.smsEnabled',
+  { value: true },
+  { id: session.user.id }
+);
+```
+
+## Audit Trail
+
+Every configuration write is appended to the `audit.audit_config` table. This table records:
+
+| Column | Description |
+|---|---|
+| `config_key` | The unique key of the changed setting |
+| `old_value` | The previous value (JSON-serialized) |
+| `new_value` | The new value (JSON-serialized) |
+| `changed_by` | The `user.id` from `userContext` |
+| `changed_at` | UTC timestamp of the change |
+
+The audit log cannot be modified through `ConfigurationService` — it is append-only and written as part of the same database transaction as the configuration update itself.
+
+## Configuration UI
+
+The configuration management page is served at `/configuracion`. It renders the current `ReminderConfig` values in a form and calls `updateReminderConfig` on submit. All fields are validated client-side before the API request is made.
+
+<Note>
+  Only authenticated users can modify system configuration. Every `update*` method in `ConfigurationService` checks `userContext?.id` and throws a `401 AppError` if the caller is not logged in. Ensure server actions and API routes pass the session user as `userContext`.
+</Note>
+
+<Tip>
+  Set `daysBeforeDue` to **7 or more** for best client reach rates. Reminders sent fewer than 3 days before the due date have lower open rates, especially when SMS is the only enabled channel.
+</Tip>

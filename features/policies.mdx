@@ -1,0 +1,203 @@
+---
+title: "Insurance Policy Lifecycle in OASIS Seguros"
+sidebarTitle: "Policies"
+description: "Complete guide to policy management in OASIS Seguros: state machine, creation, activation, renewal, and automatic payment schedule generation."
+---
+
+Insurance policies are the core financial instrument in OASIS Seguros. Each `Policy` entity links a client to an insurer, carries premium and coverage terms, and moves through a strict finite-state machine (FSM) that governs every stage of its life — from initial quote through active coverage to expiry or cancellation. The `PolicyService` enforces all state-transition rules, triggers automatic payment schedule generation on activation, and handles annual renewals.
+
+## Policy State Machine
+
+Policies follow a linear approval workflow before becoming active, and then diverge into terminal states at end-of-life.
+
+```
+COTIZADA ──submitForApproval()──► EN_TRAMITE ──approvePolicy()──► PENDIENTE_PAGO
+                                                                         │
+                                                               activatePolicy()
+                                                                         │
+                                                                         ▼
+                                                                      VIGENTE
+                                                                    /   |   \
+                                              cancelPolicy()  /   |    \ renewPolicy()
+                                                            ▼    ▼      ▼
+                                                      CANCELADA  SUSPENDIDA  NO_RENOVADA
+                                                                              (+ new VIGENTE)
+```
+
+The full set of allowed transitions is defined in `policyLifecycleService.ALLOWED_TRANSITIONS`:
+
+```
+COTIZADA      → EN_TRAMITE, CANCELADA
+EN_TRAMITE    → PENDIENTE_PAGO, CANCELADA, COTIZADA  (can revert for corrections)
+PENDIENTE_PAGO→ VIGENTE, CANCELADA
+VIGENTE       → CANCELADA, NO_RENOVADA, SUSPENDIDA
+SUSPENDIDA    → VIGENTE, CANCELADA
+CANCELADA     → (terminal — no further transitions)
+NO_RENOVADA   → (terminal — no further transitions)
+```
+
+### State Transition Table
+
+| State | Meaning | Transition method |
+|---|---|---|
+| `COTIZADA` | Initial quote generated | `submitForApproval()` |
+| `EN_TRAMITE` | Submitted to insurer for review | `approvePolicy()` |
+| `PENDIENTE_PAGO` | Approved — awaiting initial payment | `activatePolicy()` |
+| `VIGENTE` | Active, live coverage | — (managed by payment events) |
+| `CANCELADA` | Permanently cancelled | `cancelPolicy()` |
+| `NO_RENOVADA` | Expired without renewal | set by `renewPolicy()` on the old policy |
+| `SUSPENDIDA` | Temporarily suspended (e.g. missed payment) | — |
+
+## Payment Frequency Types
+
+The `PaymentFrequency` type controls how often installments are generated when a policy becomes `VIGENTE`.
+
+| Value | Interval | Months per installment |
+|---|---|---|
+| `mensual` | Monthly | 1 |
+| `trimestral` | Quarterly | 3 |
+| `semestral` | Semi-annual | 6 |
+| `anual` | Annual | 12 |
+
+These map directly to `PAYMENT_FREQUENCY_MONTHS` in `policyLifecycleService.ts`.
+
+## Automatic Payment Schedule Generation
+
+When a policy transitions to `VIGENTE` — either via `activatePolicy()` or by being created directly in that state — `PaymentService.generateSchedule()` is called automatically with a `PolicyInfo` object containing the policy's dates, frequency, and `monthlyPremium`.
+
+The schedule generator (`generatePaymentSchedule` in `policyLifecycleService.ts`) iterates from `startDate` to `endDate` in steps of the frequency's month gap, emitting one `PaymentScheduleItem` per installment:
+
+```typescript
+// policyLifecycleService.ts (simplified)
+while (!isAfter(currentDate, end)) {
+  schedule.push({
+    dueDate: formatDateOnly(currentDate),      // 'YYYY-MM-DD'
+    amountDue: roundCurrency(monthlyPremium),  // rounded to 2 decimal places
+    installmentNumber,
+  });
+  currentDate = addMonths(currentDate, monthsGap);
+  installmentNumber++;
+}
+```
+
+Each installment becomes a `Payment` record with `paymentStatus = 'pendiente'` and a `paymentReference` of `{policyNumber}-{padded installment number}` (e.g. `POL-001-01`, `POL-001-02`).
+
+## Key Operations
+
+<CardGroup cols={2}>
+  <Card title="createPolicy" icon="file-plus">
+    Validates that the referenced client and insurer exist, then creates the policy. If initial status is `VIGENTE`, schedule generation runs immediately.
+  </Card>
+  <Card title="getPolicyById" icon="file-search">
+    Fetches a single policy by UUID. Throws `AppError 404` if not found.
+  </Card>
+  <Card title="listPolicies" icon="list">
+    Returns paginated policies filtered by `PolicyFilters`. Supports status array, client ID, insurer ID, date ranges, and agent scoping.
+  </Card>
+  <Card title="updatePolicy" icon="pen-to-square">
+    Partial update of editable fields (premiums, dates, description, etc.). Does not enforce FSM — use the dedicated transition methods for status changes.
+  </Card>
+  <Card title="cancelPolicy" icon="ban">
+    Marks the policy as `CANCELADA` and records a `CancellationMetadata` object with `reason`, `cancelledBy`, and `cancelledAt`.
+  </Card>
+  <Card title="submitForApproval" icon="paper-plane">
+    Transitions `COTIZADA → EN_TRAMITE`. Throws `AppError 400` if the current status is not `COTIZADA`.
+  </Card>
+  <Card title="approvePolicy" icon="check">
+    Transitions `EN_TRAMITE → PENDIENTE_PAGO`. Throws `AppError 400` if not in `EN_TRAMITE`.
+  </Card>
+  <Card title="activatePolicy" icon="bolt">
+    Transitions `PENDIENTE_PAGO` or `EN_TRAMITE` → `VIGENTE`. Triggers client `pendiente → activo` transition and auto-generates the payment schedule.
+  </Card>
+  <Card title="renewPolicy" icon="rotate">
+    Creates a new policy with updated dates and a `-RYYYY` suffix on the number. Marks the original as `NO_RENOVADA`.
+  </Card>
+  <Card title="getStats" icon="chart-pie">
+    Returns `PolicyStats` aggregate: counts by status, total premiums, and outstanding balances.
+  </Card>
+</CardGroup>
+
+## TypeScript Example: Creating and Activating a Policy
+
+<Steps>
+  <Step title="Create the policy as a quote">
+    ```typescript
+    import { policyService } from '@/lib/core/container';
+    import type { CreatePolicyDto } from '@/lib/application/dtos/PolicyDTO';
+    import type { UserContext } from '@/lib/shared/types/UserContext';
+
+    const userCtx: UserContext = { id: 'admin-uuid', role: 'admin' };
+
+    const draft: CreatePolicyDto = {
+      policy_number: 'POL-2025-001',
+      policy_type: 'Vida',
+      product_name: 'Vida Plus',
+      client_id: 'client-uuid-here',
+      insurer_id: 'insurer-uuid-here',
+      start_date: '2025-02-01',
+      end_date: '2026-01-31',
+      payment_frequency: 'mensual',
+      annual_premium: 1200,
+      monthly_premium: 100,
+      coverage_limit: 50000,
+      deductible: 500,
+      policy_holder_name: 'María Pérez',
+    };
+
+    // New policy starts in COTIZADA state
+    const policy = await policyService.createPolicy(draft, userCtx);
+    console.log(policy.status); // 'COTIZADA'
+    ```
+  </Step>
+  <Step title="Submit for approval">
+    ```typescript
+    // COTIZADA → EN_TRAMITE
+    const inProcess = await policyService.submitForApproval(policy.id, userCtx);
+    console.log(inProcess.status); // 'EN_TRAMITE'
+    ```
+  </Step>
+  <Step title="Approve and activate">
+    ```typescript
+    // EN_TRAMITE → PENDIENTE_PAGO
+    const approved = await policyService.approvePolicy(policy.id, userCtx);
+
+    // PENDIENTE_PAGO → VIGENTE
+    // Also: triggers client pendiente→activo transition
+    //       and auto-generates 12 monthly payment installments
+    const active = await policyService.activatePolicy(
+      policy.id,
+      { policy_number: 'POL-2025-001', issue_date: '2025-02-01' },
+      userCtx
+    );
+    console.log(active.status); // 'VIGENTE'
+    ```
+  </Step>
+</Steps>
+
+## Renewal Logic
+
+Calling `renewPolicy(id, userCtx)` performs the following steps atomically:
+
+1. Reads the existing policy's `endDate`.
+2. Sets `newStartDate` to `endDate + 1 day`.
+3. Sets `newEndDate` to `newStartDate + 1 year`.
+4. Creates a new policy with:
+   - `policy_number`: `{ORIGINAL_NUMBER}-R{YYYY}` (e.g. `POL-2025-001-R2026`)
+   - Same `client_id`, `insurer_id`, `policy_type`, `payment_frequency`, and premium values.
+   - `description` prefixed with `"Renovación de póliza {ORIGINAL_NUMBER}"`.
+5. Updates the original policy's status to `NO_RENOVADA`.
+
+<Tip>
+  If the renewed policy needs to generate a payment schedule immediately, activate it via `activatePolicy()` after creation. The renewal itself creates the policy in `COTIZADA` state so it can go through the standard approval workflow.
+</Tip>
+
+## UI Pages
+
+<CardGroup cols={2}>
+  <Card title="/polizas" icon="file-contract">
+    Paginated policy list with status badge filters, premium summary, and quick-action buttons for state transitions. Agents see only policies for their assigned clients.
+  </Card>
+  <Card title="/polizas/[id]" icon="file-lines">
+    Policy detail view showing coverage terms, state-transition action buttons, linked payment schedule, and renewal history.
+  </Card>
+</CardGroup>

@@ -1,0 +1,210 @@
+---
+title: "Background Workers and Job Processing in OASIS Seguros"
+sidebarTitle: "Workers"
+description: "OASIS Seguros uses pg-boss for reliable background job processing: nightly overdue payment checks, email/SMS notifications, and policy renewal scheduling."
+---
+
+OASIS Seguros processes all time-sensitive background tasks — overdue payment detection, outbound email delivery, and policy renewals — through a dedicated worker process powered by [pg-boss](https://github.com/timgit/pg-boss). Because pg-boss stores its job queue inside PostgreSQL, there is no additional message broker to operate: jobs survive restarts, failures are automatically retried, and the full job history is queryable with standard SQL.
+
+## What is pg-boss?
+
+pg-boss is a PostgreSQL-backed job queue library for Node.js. It creates its own schema (`pgboss`) inside your existing database and manages job state, scheduling, retries, and deduplication entirely through Postgres transactions. This means the worker process shares the same `DATABASE_URL` as the web app and benefits from the same backup and replication strategy as the rest of your data.
+
+The OASIS Seguros implementation wraps pg-boss in a singleton factory (`pgboss.ts`) to avoid creating multiple connections during Next.js hot-reloads in development:
+
+```typescript
+// app/src/lib/infrastructure/queue/pgboss.ts
+export function createBoss(): PgBoss {
+  if (globalForPgBoss.boss) {
+    return globalForPgBoss.boss;
+  }
+
+  const boss = new PgBoss(getConnectionString());
+
+  boss.on('error', (error) => {
+    console.error('[PgBoss] Error:', error);
+  });
+
+  if (process.env.NODE_ENV !== 'production') {
+    globalForPgBoss.boss = boss;
+  }
+
+  return boss;
+}
+```
+
+pg-boss prefers `DIRECT_URL` over `DATABASE_URL` when both are set, which lets production deployments bypass a connection pooler (e.g. PgBouncer) for long-lived queue connections.
+
+## Worker Process
+
+The worker runs as its own container (`oasis_worker`) — separate from the `web` container — so that heavy background processing never contends with request handling. In development it starts with:
+
+```bash
+npm run worker:dev   # uses tsx to run TypeScript directly
+```
+
+In production (`docker-compose.prod.yml`) the compiled output is executed instead:
+
+```bash
+node dist/workers/index.js
+```
+
+The container is configured with `restart: always` so that any crash is automatically recovered by Docker.
+
+## Registered Job Handlers
+
+Three job types are registered at startup, each backed by a named constant from `JOB_NAMES`:
+
+| Job Name | Constant | Trigger | Handler |
+|---|---|---|---|
+| `check-overdue-payments` | `JOB_NAMES.CHECK_OVERDUE_PAYMENTS` | Cron: `0 2 * * *` (daily 2:00 AM) | `checkOverduePaymentsHandler` |
+| `send-email-notification` | `JOB_NAMES.SEND_EMAIL_NOTIFICATION` | On-demand (enqueued by web app) | `sendEmailHandler` |
+| `process-policy-renewal` | `JOB_NAMES.PROCESS_POLICY_RENEWAL` | On-demand (enqueued by web app) | `renewalHandler` |
+
+### Overdue Payments Handler
+
+`checkOverduePaymentsHandler` is scheduled to run every day at 2:00 AM via a pg-boss cron expression. It delegates to `paymentService.processOverduePayments()`, which scans for payment records whose due date has passed, marks them as `vencido`, and enqueues `send-email-notification` jobs for the affected clients. The handler logs both the number of records processed and any errors encountered.
+
+```typescript
+// app/src/workers/handlers/overdue.handler.ts
+export async function checkOverduePaymentsHandler(job: OverduePaymentsJob) {
+  logger.info('Worker', 'Iniciando job de pagos vencidos', { jobId: job.id });
+  const result = await paymentService.processOverduePayments();
+  logger.info('Worker', 'Job de pagos vencidos completado', {
+    jobId: job.id,
+    processed: result.processed,
+    errors: result.errors,
+  });
+  return result;
+}
+```
+
+### Email Notification Handler
+
+`sendEmailHandler` processes outbound email jobs enqueued by other parts of the system. Each job payload carries the full email: recipient address, subject, and rendered HTML body. The handler calls `notificationService.sendEmail()` and re-throws any error so pg-boss can apply its retry policy.
+
+```typescript
+// app/src/workers/handlers/notifications.handler.ts
+export async function sendEmailHandler(job: SendEmailJob) {
+  const { to, subject, html } = job.data;
+  const result = await notificationService.sendEmail({ to, subject, html });
+
+  if (!result.success && result.error) {
+    throw new Error(result.error);
+  }
+
+  return result;
+}
+```
+
+### Policy Renewal Handler
+
+`renewalHandler` receives a `policyId` in the job payload and delegates to `policyService.renewPolicy()` to create the renewed policy record. This handler is invoked on-demand whenever a renewal is triggered — either manually from the UI or from another scheduled process.
+
+```typescript
+// app/src/workers/handlers/renewal.handler.ts
+export async function renewalHandler(job: RenewalJob) {
+  const { policyId } = job.data;
+  const result = await policyService.renewPolicy(policyId, undefined);
+  logger.info('Worker', 'Póliza renovada', { policyId, newPolicyId: result.id });
+  return result;
+}
+```
+
+## Bootstrap Sequence
+
+When the worker process starts, `bootstrap()` in `workers/index.ts` runs through a fixed initialization sequence:
+
+<Steps>
+  <Step title="initializeBoss()">
+    Calls `boss.start()` to connect pg-boss to PostgreSQL. If the `pgboss` schema does not yet exist it is created automatically.
+
+    ```typescript
+    await initializeBoss();
+    ```
+  </Step>
+  <Step title="boss.createQueue()">
+    Creates (or validates) a queue for each job type. This is idempotent — safe to run on every startup.
+
+    ```typescript
+    await boss.createQueue(JOB_NAMES.CHECK_OVERDUE_PAYMENTS);
+    await boss.createQueue(JOB_NAMES.SEND_EMAIL_NOTIFICATION);
+    await boss.createQueue(JOB_NAMES.PROCESS_POLICY_RENEWAL);
+    ```
+  </Step>
+  <Step title="boss.work()">
+    Registers a handler function for each queue. pg-boss calls the handler with batches of jobs as they become available.
+
+    ```typescript
+    await boss.work<OverduePaymentsData>(JOB_NAMES.CHECK_OVERDUE_PAYMENTS, async ([job]) =>
+      checkOverduePaymentsHandler({ id: job.id, data: job.data })
+    );
+    await boss.work<SendEmailData>(JOB_NAMES.SEND_EMAIL_NOTIFICATION, async ([job]) =>
+      sendEmailHandler({ id: job.id, data: job.data })
+    );
+    await boss.work<RenewalData>(JOB_NAMES.PROCESS_POLICY_RENEWAL, async ([job]) =>
+      renewalHandler({ id: job.id, data: job.data })
+    );
+    ```
+  </Step>
+  <Step title="boss.schedule()">
+    Registers the cron expression for the overdue payments check. The schedule is stored in Postgres so it persists across worker restarts.
+
+    ```typescript
+    await boss.schedule(JOB_NAMES.CHECK_OVERDUE_PAYMENTS, '0 2 * * *');
+    ```
+  </Step>
+</Steps>
+
+## Graceful Shutdown
+
+The worker registers handlers for both `SIGTERM` (sent by Docker on `docker stop`) and `SIGINT` (Ctrl-C). Either signal triggers a graceful drain: pg-boss completes any in-progress job and cleanly releases its database connection before the process exits.
+
+```typescript
+process.on('SIGTERM', async () => {
+  logger.info('Worker', 'SIGTERM recibido, apagando...');
+  await boss.stop({ graceful: true });
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  logger.info('Worker', 'SIGINT recibido, apagando...');
+  await boss.stop({ graceful: true });
+  process.exit(0);
+});
+```
+
+## Running the Worker Locally
+
+<CodeGroup>
+```bash Development (tsx, no compile step)
+npm run worker:dev
+```
+
+```bash Production (compiled output)
+node dist/workers/index.js
+```
+
+```bash Inside Docker (development)
+docker-compose logs -f worker
+```
+</CodeGroup>
+
+<Note>
+  The worker must have access to the **same `DATABASE_URL`** (or `DIRECT_URL`) as the web app. In `docker-compose.yml` both containers receive identical `DATABASE_URL` and `DIRECT_URL` environment variables pointing to the `db` service. If you run the worker outside Docker, ensure its `.env` file points to the same PostgreSQL instance.
+</Note>
+
+## Job Execution Tracking
+
+All job runs are recorded to the `notifications.job_execution` table, which stores:
+
+| Column | Description |
+|---|---|
+| `job_name` | The `JOB_NAMES` constant value (e.g. `check-overdue-payments`) |
+| `status` | `success` or `error` |
+| `duration_ms` | Wall-clock execution time in milliseconds |
+| `records_processed` | Number of records affected (for batch jobs) |
+| `error_message` | Error detail when `status = 'error'` |
+| `executed_at` | Timestamp of the job run |
+
+This table provides a full audit trail that can be queried from the admin UI or directly via Prisma.

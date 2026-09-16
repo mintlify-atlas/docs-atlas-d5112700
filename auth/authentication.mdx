@@ -1,0 +1,279 @@
+---
+title: "Authenticate with OASIS Seguros Using Better-Auth"
+sidebarTitle: "Authentication"
+description: "OASIS Seguros uses Better-Auth for session-based authentication with email/password login, bcrypt password hashing, and 7-day session management."
+---
+
+OASIS Seguros uses [Better-Auth](https://www.better-auth.com/) as its authentication layer, configured with a Prisma adapter backed by PostgreSQL 15. The system supports email/password credentials with bcrypt hashing, server-managed sessions, and both server-side and client-side session access patterns — all wired into the Next.js 16 App Router via the `@/lib/auth` module.
+
+## Auth Provider
+
+Better-Auth is initialized in `app/src/lib/auth/auth.server.ts` using the Prisma adapter pointing at the `auth` PostgreSQL schema. The base path for all auth endpoints is `/api/auth`.
+
+```typescript
+import { betterAuth } from 'better-auth';
+import { prismaAdapter } from 'better-auth/adapters/prisma';
+import { db } from '@/lib/infrastructure/database/db';
+import { hash, compare } from 'bcryptjs';
+import { randomUUID } from 'crypto';
+
+export const auth = betterAuth({
+    basePath: '/api/auth',
+    database: prismaAdapter(db, {
+        provider: 'postgresql',
+    }),
+    emailAndPassword: {
+        enabled: true,
+        password: {
+            hash: async (password: string) => {
+                return await hash(password, 10);
+            },
+            verify: async ({ password, hash: storedHash }) => {
+                return await compare(password, storedHash);
+            },
+        },
+    },
+    user: {
+        additionalFields: {
+            role: {
+                type: 'string',
+                required: false,
+                defaultValue: 'user',
+                input: false, // clients cannot set this directly
+            },
+        },
+    },
+    session: {
+        expiresIn: 60 * 60 * 24 * 7, // 7 days
+        updateAge: 60 * 60 * 24,      // refresh every 24 hours
+    },
+    advanced: {
+        database: {
+            generateId: () => randomUUID(),
+        },
+    },
+});
+
+export type Session = typeof auth.$Infer.Session;
+```
+
+<Note>
+  `BETTER_AUTH_SECRET` must be **at least 32 characters** in production. A short or missing secret will cause session signing to fail silently.
+</Note>
+
+## Session Management
+
+Sessions in OASIS Seguros are fully server-managed. Better-Auth issues a signed session token on successful login and stores session metadata in the `auth.session` table.
+
+<CardGroup cols={2}>
+  <Card title="Session Lifetime" icon="clock">
+    Sessions expire **7 days** (604 800 seconds) after creation. The session record is automatically deleted from the database once it expires.
+  </Card>
+  <Card title="Rolling Refresh" icon="arrows-rotate">
+    Active sessions are refreshed every **24 hours**, extending the expiry without requiring a new login.
+  </Card>
+  <Card title="Token Storage" icon="database">
+    Each session token is a unique string up to **255 characters**, stored in the `auth.session` table and indexed for fast lookup.
+  </Card>
+  <Card title="Device Metadata" icon="fingerprint">
+    The **IP address** (up to 45 characters) and **User-Agent** string are recorded per session for audit and anomaly-detection purposes.
+  </Card>
+</CardGroup>
+
+### Session Database Model
+
+The `Session` model lives in the `auth` PostgreSQL schema:
+
+```prisma
+model Session {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique @db.VarChar(255)
+  expiresAt DateTime @map("expires_at")
+  ipAddress String?  @map("ip_address") @db.VarChar(45)
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("session")
+  @@schema("auth")
+}
+```
+
+## Password Security
+
+All passwords are hashed with **bcrypt at cost factor 10** using `bcryptjs`. The raw password is never stored; only the resulting hash is persisted in the `auth.account` table (`password` column) and optionally in `auth.user.password_hash`.
+
+```typescript
+password: {
+    hash: async (password: string) => await hash(password, 10),
+    verify: async ({ password, hash: storedHash }) => await compare(password, storedHash),
+},
+```
+
+## Login Flow
+
+<Steps>
+  <Step title="Submit credentials">
+    The login page (`app/(auth)/login/page.tsx`) calls `signIn.email` from the Better-Auth React client with the user's email and password:
+
+    ```typescript
+    import { signIn } from '@/lib/auth/auth.client';
+
+    const { error } = await signIn.email({
+        email: values.email,
+        password: values.password,
+    });
+    ```
+  </Step>
+  <Step title="Better-Auth validates and creates a session">
+    Better-Auth receives the credentials at `POST /api/auth/sign-in/email`, verifies the bcrypt hash, and writes a new row to `auth.session` with a fresh token and a 7-day expiry.
+  </Step>
+  <Step title="Session cookie is set">
+    Better-Auth automatically sets an HTTP-only session cookie on the response. No manual cookie handling is required.
+  </Step>
+  <Step title="Subsequent requests are authenticated">
+    Every server request that includes the session cookie can resolve the authenticated user. Subsequent calls to `auth.api.getSession` will return the live session until it expires or is revoked.
+  </Step>
+</Steps>
+
+## Reading the Session on the Server
+
+Use `auth.api.getSession` inside Server Components, Server Actions, or API Route Handlers by forwarding the incoming request headers:
+
+```typescript
+import { auth } from '@/lib/auth';
+import { headers } from 'next/headers';
+
+const session = await auth.api.getSession({
+    headers: await headers(),
+});
+const user = session?.user;
+```
+
+The `auth.guard.ts` module wraps this call with `React.cache()` so the session is fetched at most once per request tree, even if multiple components call it concurrently:
+
+```typescript
+import { cache } from 'react';
+import { headers } from 'next/headers';
+import { auth, type Session } from './auth.server';
+
+export const getServerSession = cache(async (): Promise<Session | null> => {
+    try {
+        const headersList = await headers();
+        const session = await auth.api.getSession({
+            headers: headersList,
+        });
+        return session;
+    } catch {
+        return null;
+    }
+});
+```
+
+## Client-Side Auth
+
+The Better-Auth React client is configured in `auth.client.ts` and exposes hooks and action helpers for use inside Client Components:
+
+```typescript
+import { createAuthClient } from 'better-auth/react';
+
+const authClient = createAuthClient({
+    baseURL: process.env.NEXT_PUBLIC_BETTER_AUTH_URL || 'http://localhost:3000',
+});
+
+export const { signIn, signOut, signUp, useSession, getSession } = authClient;
+export { authClient };
+```
+
+<CardGroup cols={2}>
+  <Card title="useSession" icon="user-check">
+    React hook that returns the current session and a loading state. Re-renders automatically when the session changes.
+  </Card>
+  <Card title="signIn / signOut" icon="right-to-bracket">
+    Imperative helpers for triggering login and logout from event handlers or form submissions.
+  </Card>
+  <Card title="signUp" icon="user-plus">
+    Creates a new user account and immediately establishes a session.
+  </Card>
+  <Card title="getSession" icon="magnifying-glass">
+    One-shot async function to fetch the current session outside of a React render cycle.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Only import `auth.client.ts` exports inside `'use client'` components. Server Components must use `auth.server.ts` or `auth.guard.ts` instead.
+</Tip>
+
+## Route Protection
+
+The `auth.guard.ts` module provides three server-side helpers for protecting pages and layouts:
+
+```typescript
+// Redirect to /login if not authenticated
+export async function requireAuth(redirectTo?: string): Promise<Session>
+
+// Redirect to fallbackUrl if authenticated user lacks the required role
+export async function requireRole(
+    allowedRoles: string[],
+    fallbackUrl: string = '/'
+): Promise<Session>
+
+// Boolean check — does not redirect
+export async function isAuthenticated(): Promise<boolean>
+```
+
+**Example — protecting a dashboard layout:**
+
+```typescript
+// app/dashboard/layout.tsx
+import { requireAuth } from '@/lib/auth';
+
+export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
+    const session = await requireAuth();
+    return <div>Welcome, {session.user.name}{children}</div>;
+}
+```
+
+**Example — restricting to specific roles:**
+
+```typescript
+// app/admin/page.tsx
+import { requireRole } from '@/lib/auth';
+
+export default async function AdminPage() {
+    const session = await requireRole(['admin']);
+    return <div>Admin panel for {session.user.email}</div>;
+}
+```
+
+## Database Models
+
+All auth-related tables live in the dedicated `auth` PostgreSQL schema. The Prisma schema uses `@@schema("auth")` on every model.
+
+| Model | Table | Purpose |
+|---|---|---|
+| `User` | `auth.user` | Core user record with business fields (role, cedula, phone, etc.) |
+| `Session` | `auth.session` | Active sessions with token, expiry, IP, and user-agent |
+| `Account` | `auth.account` | Provider accounts; stores the bcrypt `password` for email/password |
+| `RefreshToken` | `auth.refresh_token` | Legacy refresh token table kept for compatibility |
+| `Verification` | `auth.verification` | Short-lived tokens for email verification flows |
+| `Role` | `auth.role` | Role definitions with `permissions` JSON field |
+| `UserRole` | `auth.user_role` | Many-to-many mapping of users to roles |
+
+## UUID Generation
+
+All primary keys across the `auth` schema are PostgreSQL `UUID` columns (`@db.Uuid`). Better-Auth is configured to generate them with Node's built-in `crypto.randomUUID()`:
+
+```typescript
+advanced: {
+    database: {
+        generateId: () => randomUUID(),
+    },
+},
+```
+
+This ensures compatibility with Prisma's `@db.Uuid` column type and avoids the shorter nanoid-style IDs that Better-Auth would otherwise produce.

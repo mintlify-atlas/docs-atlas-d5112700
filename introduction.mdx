@@ -1,0 +1,81 @@
+---
+title: "OASIS Seguros: Insurance Brokerage Management Platform"
+sidebarTitle: "Introduction"
+description: "OASIS Seguros is a full-stack insurance management platform for brokers. Manage clients, policies, payments, and notifications in one system."
+---
+
+OASIS Seguros is a full-stack insurance brokerage management platform designed for brokers, agents, and administrators who need a single system to track every stage of a client's insurance lifecycle — from initial onboarding through policy renewal, payment collection, and compliance reporting.
+
+## Who It's For
+
+OASIS Seguros is built for insurance-sector teams that have outgrown spreadsheets and disconnected point tools:
+
+- **Insurance brokers** who manage a portfolio of clients across multiple policy types and need real-time visibility into renewals and payment status.
+- **Agents and account managers** who handle day-to-day client communication, document collection, and policy changes.
+- **Administrators and back-office staff** who process payments, generate schedules, and require a complete, tamper-evident audit trail.
+
+## Key Capabilities
+
+**Client Lifecycle Management** — Onboard clients with full contact and document profiles, track every interaction, and surface upcoming renewals before they lapse.
+
+**Policy State Machine** — Policies move through a well-defined set of states (draft → active → suspended → cancelled / renewed) with enforced transitions that prevent invalid status changes and record every transition event.
+
+**Payment Schedule Generation** — Automatically generate monthly or custom payment schedules tied to each policy, track individual payment events, and flag overdue installments for follow-up.
+
+**Multi-Channel Notifications** — Deliver renewal reminders, payment confirmations, and overdue alerts via email (Resend or SMTP) and SMS (Twilio). Notification jobs run as background workers so the web layer stays responsive.
+
+**Audit Logging** — Every write operation — client updates, policy state changes, payment recordings — is appended to an immutable audit log. Entries capture the acting user, timestamp, before/after state, and IP address for full regulatory traceability.
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| **Web Framework** | Next.js 16 (App Router) |
+| **UI Library** | React 19 |
+| **Database** | PostgreSQL 15 |
+| **ORM** | Prisma ORM |
+| **Cache & Sessions** | Redis |
+| **Authentication** | Better-Auth (email + password, bcrypt, JWT sessions) |
+| **Background Workers** | pg-boss (PostgreSQL-backed job queue) |
+| **Email** | Resend / SMTP |
+| **SMS** | Twilio |
+| **UI Components** | Shadcn UI |
+| **Styling** | Tailwind CSS 4 |
+| **Containerisation** | Docker + Docker Compose |
+| **Schema Validation** | Zod |
+
+## Architecture
+
+OASIS Seguros follows **Clean Architecture** combined with **Domain-Driven Design** principles, expressed in three layers inside `app/src/lib/`:
+
+```
+app/src/
+├── lib/
+│   ├── domain/           # Pure business logic — entities, value objects, domain events
+│   ├── application/      # Use cases and application services — orchestrate domain objects
+│   └── infrastructure/   # Technical adapters — Prisma client, Redis, Twilio, Resend
+├── app/                  # Next.js App Router — pages and API route handlers
+└── components/
+    ├── ui/               # Shadcn UI primitives
+    ├── features/         # Domain-aligned composite components
+    └── layout/           # Shell, sidebar, navigation
+```
+
+The domain layer has zero framework dependencies, making business rules independently testable. Application services coordinate domain logic and call infrastructure adapters; they are the only layer that Next.js API routes invoke directly.
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install and run OASIS Seguros locally with Docker or a direct Node.js setup in under 10 minutes.
+  </Card>
+  <Card title="Environment Variables" icon="sliders" href="/environment-variables">
+    Full reference for every environment variable — database, auth, Redis, email, and SMS.
+  </Card>
+  <Card title="Architecture" icon="layer-group" href="/architecture">
+    Deep dive into the Clean Architecture layers, domain model, and dependency rules.
+  </Card>
+  <Card title="Core Features" icon="shield-halved" href="/features">
+    Explore client management, the policy state machine, payment schedules, and audit logging.
+  </Card>
+</CardGroup>

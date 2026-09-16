@@ -1,0 +1,231 @@
+---
+title: "Role-Based Access Control and Permissions in OASIS Seguros"
+sidebarTitle: "Roles & Permissions"
+description: "OASIS Seguros uses six roles with Attribute-Based Access Control (ABAC) scoping data to agent portfolios and restricting operations by role."
+---
+
+OASIS Seguros enforces access control through a two-layer model: a **Role-Based Access Control (RBAC)** layer that gates which areas of the application a user can enter, and an **Attribute-Based Access Control (ABAC)** layer that scopes the data visible within those areas. Every authenticated request carries a `UserContext` containing the user's ID and role, and service-layer functions use that context to enforce both layers automatically.
+
+## System Roles
+
+Six roles are defined in the `UserRoleEnum` Prisma enum (schema: `auth`). Each role maps to a discrete level of access across the platform.
+
+| Role | Description |
+|---|---|
+| `admin` | Full system access — user management, system configuration, unrestricted data visibility across all agents |
+| `agente` | Insurance agent; can only see clients, policies, and payments assigned directly to them |
+| `supervisor` | Oversees agents; broader read access across multiple agent portfolios |
+| `auditor` | Read-only access to audit logs and reports; cannot create or mutate records |
+| `operador` | Operational tasks and day-to-day data entry; limited configuration rights |
+| `cliente` | End-client portal access; read their own policies and payment history only |
+
+```prisma
+enum UserRoleEnum {
+  admin
+  agente
+  cliente
+  supervisor
+  auditor
+  operador
+
+  @@schema("auth")
+}
+```
+
+<Warning>
+  The `admin` role bypasses all ABAC scoping filters and has **unrestricted access to every record across all agents**. Admin accounts should be tightly controlled and their credentials should never be used for routine operational work.
+</Warning>
+
+## UserContext Type
+
+Every Server Action and application service receives a `UserContext` object derived from the authenticated Better-Auth session. This type is defined in `app/src/lib/shared/types/UserContext.ts`:
+
+```typescript
+export interface UserContext {
+    /** Unique user ID (UUID) */
+    id: string;
+
+    /** User's email address */
+    email: string;
+
+    /** Role within the system */
+    role: string;
+
+    /** Full name (optional) */
+    name?: string;
+
+    /** Whether the email has been verified */
+    emailVerified?: boolean;
+}
+
+/** Type guard — validates that an unknown object is a UserContext */
+export function isUserContext(obj: unknown): obj is UserContext {
+    if (!obj || typeof obj !== 'object') return false;
+    const ctx = obj as Record<string, unknown>;
+    return (
+        typeof ctx.id === 'string' &&
+        typeof ctx.email === 'string' &&
+        typeof ctx.role === 'string'
+    );
+}
+
+/** Canonical role constants */
+export const USER_ROLES = {
+    ADMIN:   'admin',
+    AGENTE:  'agente',
+    CLIENTE: 'cliente',
+} as const;
+
+export type UserRole = (typeof USER_ROLES)[keyof typeof USER_ROLES];
+```
+
+<Info>
+  The `role` field on `UserContext` is a plain `string` to remain forward-compatible with runtime role additions. Compare it against the `USER_ROLES` constants or the `UserRoleEnum` values rather than raw string literals.
+</Info>
+
+## Attribute-Based Access Control (ABAC)
+
+ABAC scoping is applied at the **service layer**, not in middleware. When a service function receives a `UserContext` with `role === 'agente'`, it automatically narrows every database query to records where `assignedAgentId` equals `userContext.id`.
+
+### Scoped Services
+
+The following service operations enforce agent-level scoping:
+
+<CardGroup cols={2}>
+  <Card title="listPaymentsForUI" icon="money-bill-wave">
+    Payment listings are filtered to policies whose clients are assigned to the calling agent.
+  </Card>
+  <Card title="getMetrics" icon="chart-bar">
+    Dashboard metrics (totals, overdue counts, collection rates) are computed only over the agent's own portfolio.
+  </Card>
+  <Card title="getCollectionPriorityList" icon="list-check">
+    The collection priority queue only surfaces overdue payments belonging to the agent's clients.
+  </Card>
+  <Card title="listPolicies" icon="file-contract">
+    Policy listings exclude records assigned to other agents; the agent can never enumerate policies outside their portfolio.
+  </Card>
+</CardGroup>
+
+### ABAC Pattern
+
+The canonical pattern used across service functions:
+
+```typescript
+import { UserContext } from '@/lib/shared/types/UserContext';
+
+async function listPolicies(userContext: UserContext) {
+    const scopeFilter =
+        userContext.role === 'agente'
+            ? { client: { assignedAgentId: userContext.id } }
+            : {};
+
+    return db.policy.findMany({
+        where: {
+            ...scopeFilter,
+            // additional query filters …
+        },
+    });
+}
+```
+
+Roles other than `agente` (e.g., `admin`, `supervisor`) receive an empty `scopeFilter` (`{}`), which causes the query to return all matching records.
+
+## Role Storage and Assignment
+
+Roles are stored in two complementary places within the `auth` schema:
+
+<CardGroup cols={2}>
+  <Card title="auth.user.role" icon="tag">
+    A denormalised `VARCHAR(50)` column on the `User` model with a default value of `'user'`. Better-Auth reads this field directly when it builds the session's `user` object.
+  </Card>
+  <Card title="auth.user_role" icon="table">
+    A many-to-many join table (`UserRole`) linking users to full `Role` records. Each assignment records who granted it (`assignedBy`) and when (`assignedAt`).
+  </Card>
+</CardGroup>
+
+```prisma
+model UserRole {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  roleId         String   @map("role_id") @db.Uuid
+  assignedAt     DateTime @default(now()) @map("assigned_at")
+  assignedBy     String?  @map("assigned_by") @db.Uuid
+  assignedByUser User?    @relation("RoleAssignedBy", fields: [assignedBy], references: [id], onUpdate: NoAction)
+  role           Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@map("user_role")
+  @@schema("auth")
+}
+```
+
+Only users with the `admin` role can assign or revoke roles for other users.
+
+## Route Protection with the Auth Guard
+
+Dashboard routes are protected at the **data layer** using helpers from `auth.guard.ts`, following Next.js 2025+ security recommendations. The key functions are:
+
+```typescript
+// Redirect to /login if unauthenticated
+export async function requireAuth(redirectTo?: string): Promise<Session>
+
+// Redirect to fallbackUrl if the user lacks one of the allowed roles
+export async function requireRole(
+    allowedRoles: string[],
+    fallbackUrl: string = '/'
+): Promise<Session>
+
+// Non-redirecting session check
+export const getServerSession: () => Promise<Session | null>
+```
+
+**Restricting a page to admins and supervisors:**
+
+```typescript
+// app/reports/page.tsx
+import { requireRole } from '@/lib/auth';
+
+export default async function ReportsPage() {
+    const session = await requireRole(['admin', 'supervisor']);
+    // Only admin and supervisor users reach this point
+    return <ReportsDashboard user={session.user} />;
+}
+```
+
+**Protecting a shared layout for all authenticated users:**
+
+```typescript
+// app/dashboard/layout.tsx
+import { requireAuth } from '@/lib/auth';
+
+export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
+    await requireAuth();
+    return <>{children}</>;
+}
+```
+
+<Tip>
+  Calling `requireRole` internally calls `requireAuth` first, so you never need to chain both calls. A single `requireRole` is sufficient to assert both authentication and authorisation.
+</Tip>
+
+## Role Decision Matrix
+
+The table below summarises which operations are available to each role. A ✅ means the role has access; an ABAC tag means access is granted but the data is scoped to the user's own portfolio.
+
+| Operation | admin | supervisor | agente | operador | auditor | cliente |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| View all clients | ✅ | ✅ | ABAC | ✅ | ✅ | — |
+| View all policies | ✅ | ✅ | ABAC | ✅ | ✅ | ABAC |
+| View all payments | ✅ | ✅ | ABAC | ✅ | ✅ | ABAC |
+| Create / edit clients | ✅ | — | ✅ | ✅ | — | — |
+| Create / edit policies | ✅ | — | ✅ | ✅ | — | — |
+| Record payments | ✅ | — | ✅ | ✅ | — | — |
+| View audit logs | ✅ | — | — | — | ✅ | — |
+| Manage users & roles | ✅ | — | — | — | — | — |
+| System configuration | ✅ | — | — | — | — | — |
+
+<Note>
+  Agents should only be assigned clients from their own portfolio. Assigning an agent to clients they should not service undermines the ABAC data isolation model, because all ABAC filters rely on the `assignedAgentId` field being set correctly on each `Client` record.
+</Note>

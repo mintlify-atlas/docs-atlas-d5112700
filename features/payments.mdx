@@ -1,0 +1,207 @@
+---
+title: "Payment Management and Schedule Generation"
+sidebarTitle: "Payments"
+description: "How OASIS Seguros generates payment schedules, tracks installments, classifies payment status, and processes overdue payments automatically."
+---
+
+Payments in OASIS Seguros represent individual installments tied to an insurance policy. They are either **automatically generated** as a schedule when a policy becomes active, or **manually recorded** by an agent or admin when a client makes a payment. The `PaymentService` handles creation, listing, schedule generation, overdue processing, and ABAC-based access scoping — ensuring agents only interact with payments belonging to their assigned clients.
+
+## Payment Statuses
+
+| Status | Description |
+|---|---|
+| `pendiente` | Installment created but not yet paid |
+| `verificando` | Payment received and under verification |
+| `pagado` | Fully paid — `amountPaid >= amountDue` |
+| `parcial` | Partially paid — `0 < amountPaid < amountDue` |
+| `vencido` | Due date passed without full payment |
+| `rechazado` | Payment submission was rejected |
+| `cancelado` | Installment cancelled (e.g. policy cancelled) |
+
+## Payment Methods
+
+The `PaymentMethod` type supports the following values:
+
+| Method | Description |
+|---|---|
+| `transferencia` | Bank transfer |
+| `tarjeta_credito` | Credit card |
+| `efectivo` | Cash |
+| `cheque` | Cheque |
+| `automatico` | Automatic debit / direct debit |
+| `cripto` | Cryptocurrency |
+
+## Automatic Schedule Generation
+
+When a policy transitions to `VIGENTE`, `PaymentService.generateSchedule()` is called automatically. It uses `generatePaymentSchedule()` from `policyLifecycleService.ts` to build the full installment list.
+
+```typescript
+// policyLifecycleService.ts — generatePaymentSchedule (simplified)
+const monthsGap = PAYMENT_FREQUENCY_MONTHS[paymentFrequency]; // 1 | 3 | 6 | 12
+let currentDate = toStartOfDay(startDate);
+let installmentNumber = 1;
+
+while (!isAfter(currentDate, endDate)) {
+  schedule.push({
+    dueDate: formatDateOnly(currentDate),       // 'YYYY-MM-DD'
+    amountDue: roundCurrency(monthlyPremium),   // rounded to 2 decimal places
+    installmentNumber,
+  });
+  currentDate = addMonths(currentDate, monthsGap);
+  installmentNumber++;
+}
+```
+
+Each item in the schedule is persisted as a `Payment` record with:
+- `paymentStatus`: `'pendiente'`
+- `amountPaid`: `0`
+- `paymentReference`: `{policyNumber}-{installmentNumber padded to 2 digits}` (e.g. `POL-001-01`)
+- `currencyCode`: `'USD'`
+
+<Note>
+  Schedule generation requires `startDate`, `endDate`, `paymentFrequency`, and `monthlyPremium` to all be present on the policy. Missing any of these will throw `AppError 400`.
+</Note>
+
+## Payment Classification Logic
+
+When a payment is recorded via `createPayment()`, the service automatically determines the `paymentStatus` using `classifyPayment()`:
+
+```typescript
+// PaymentService.classifyPayment()
+private classifyPayment(amountPaid: number, amountDue: number): string {
+  if (amountPaid >= amountDue) return 'pagado';
+  if (amountPaid > 0)          return 'parcial';
+  return 'pendiente';
+}
+```
+
+The `amountRemaining` is stored as `roundCurrency(amountDue - amountPaid)` and the policy's `totalPaid` and `outstandingBalance` are updated atomically in the same request.
+
+<Tip>
+  The `CreatePaymentSchema` enforces a 5% overpayment tolerance: `amount_paid` must not exceed `amount_due * 1.05`.
+</Tip>
+
+## Days Late Calculation
+
+Days late (`paymentDaysLate`) is computed at the moment of recording a payment:
+
+```typescript
+// PaymentService.calculateDaysLate()
+private calculateDaysLate(dueDate: Date, paymentDate: Date): number {
+  const due  = new Date(dueDate);
+  const paid = new Date(paymentDate);
+  due.setHours(0, 0, 0, 0);
+  paid.setHours(0, 0, 0, 0);
+
+  if (paid <= due) return 0;
+  const diffTime = paid.getTime() - due.getTime();
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+```
+
+A value of `0` means the payment was on time or early. Positive integers indicate calendar days of delay.
+
+## Overdue Processing
+
+A background worker (pg-boss job) calls `processOverduePayments()` **nightly at 2:00 AM**. The method:
+
+1. Fetches all payments where `dueDate < today` and `paymentStatus ≠ 'pagado'` via `paymentRepository.findOverdue(new Date())`.
+2. Marks each as overdue using `paymentRepository.markAsOverdue(id, daysLate)`.
+3. Sends an overdue notice via `notificationService.sendOverdueNotice()` to the linked client.
+4. Returns a `{ processed, errors }` summary.
+
+```typescript
+const result = await paymentService.processOverduePayments();
+console.log(`Processed: ${result.processed}, Errors: ${result.errors}`);
+```
+
+<Warning>
+  `processOverduePayments()` uses a dynamic import of `notificationService` from the DI container to avoid a circular dependency. Ensure the container is fully initialised before the worker runs.
+</Warning>
+
+## Key Operations
+
+<CardGroup cols={2}>
+  <Card title="createPayment" icon="circle-dollar-to-slot">
+    Validates policy access (ABAC), auto-generates a reference, classifies status, calculates days late, and updates the policy's `totalPaid` and `outstandingBalance`.
+  </Card>
+  <Card title="listPaymentsForUI" icon="table-list">
+    Atomic count + findMany in a Prisma transaction. Supports free-text search across reference, receipt, payer name, policy number, and client name/email. ABAC-scoped.
+  </Card>
+  <Card title="generateSchedule" icon="calendar-days">
+    Creates all installment records for a policy from `startDate` to `endDate` based on `paymentFrequency` and `monthlyPremium`.
+  </Card>
+  <Card title="processOverduePayments" icon="clock-rotate-left">
+    Nightly batch job that marks past-due installments as `vencido` and dispatches overdue notices.
+  </Card>
+</CardGroup>
+
+## ABAC Scoping
+
+`PaymentService` enforces **attribute-based access control** at the query level:
+
+- **Admin / other roles**: No additional filters — sees all payments.
+- **Agente (`agente` role)**: Results are filtered to `policy.client.assignedAgentId = userContext.id`.
+
+This is applied in both `listPaymentsForUI` (via `getScopeFilters`) and `listPayments` (via `applyScope`), and individual access is checked in `getPaymentById` and `createPayment` via `fetchPolicy` and `ensurePaymentAccess`.
+
+## TypeScript Example: Recording a Payment
+
+```typescript
+import { paymentService } from '@/lib/core/container';
+import type { CreatePaymentDto } from '@/lib/application/dtos/PaymentDTO';
+import type { UserContext } from '@/lib/shared/types/UserContext';
+
+const userCtx: UserContext = { id: 'agent-uuid', role: 'agente' };
+
+const paymentData: CreatePaymentDto = {
+  policy_id: 'policy-uuid-here',
+  payment_date: '2025-03-01',
+  due_date: '2025-03-01',
+  payment_method: 'transferencia',
+  amount_paid: 100.00,
+  amount_due: 100.00,
+  payer_name: 'María Pérez',
+  receipt_number: 'REC-2025-0301',
+  currency_code: 'USD',
+};
+
+try {
+  const payment = await paymentService.createPayment(paymentData, userCtx);
+  // payment.paymentStatus === 'pagado'  (amountPaid >= amountDue)
+  // payment.paymentDaysLate === 0       (paid on due date)
+  console.log('Pago registrado:', payment.paymentReference);
+} catch (error) {
+  // AppError 403 if agent does not own the policy's client
+  // AppError 404 if policy not found
+  console.error(error);
+}
+```
+
+## Listing Payments for the UI
+
+`listPaymentsForUI` accepts a `PaymentListParams` object and returns a `PaymentListResponseDTO`:
+
+```typescript
+import { paymentService } from '@/lib/core/container';
+import type { PaymentListParams } from '@/lib/application/dtos/PaymentDTO';
+
+const params: PaymentListParams = {
+  page: 1,
+  limit: 20,
+  status: ['pendiente', 'vencido'],
+  dateFrom: '2025-01-01',
+  dateTo: '2025-03-31',
+  q: 'María',           // searches reference, receipt, payer, policy number, client name/email
+};
+
+const result = await paymentService.listPaymentsForUI(params, userCtx);
+// result.data          → PaymentListItemDTO[]
+// result.pagination    → { total, page, limit, totalPages }
+```
+
+## UI Page
+
+<Card title="/pagos" icon="money-bill-wave">
+  Paginated payment list with status badge filters, date range picker, free-text search, and quick totals. The table includes linked policy number and client name with click-through navigation.
+</Card>

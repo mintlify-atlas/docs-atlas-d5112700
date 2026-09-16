@@ -1,47 +1,195 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with OASIS Seguros"
+sidebarTitle: "Quickstart"
+description: "Learn how to install, configure, and run OASIS Seguros locally using Docker or a direct Node.js setup in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+OASIS Seguros ships with a Docker Compose configuration that brings up the full stack — PostgreSQL 15, Redis, the Next.js web app, and the pg-boss background worker — with a single command. If you prefer to run services natively, the Local Development path below walks through the same steps against a locally installed PostgreSQL and Redis.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+## Choose Your Setup Path
 
-## Prerequisites
+<Tabs>
+  <Tab title="Docker (Recommended)">
+    Docker is the fastest way to get a fully working environment. All services are pre-wired; no manual database or Redis configuration is needed beyond setting `BETTER_AUTH_SECRET`.
 
-Before you begin, you must have:
+    <Steps>
+      <Step title="Clone the repository">
+        ```bash
+        git clone https://github.com/JohannCaizaguano/OasisSeguros.git
+        cd OasisSeguros
+        ```
+      </Step>
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+      <Step title="Create your environment file">
+        Copy the bundled example and open it in your editor:
 
-## Get started
+        ```bash
+        cp app/.env.example app/.env
+        ```
 
-<Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+        The Docker Compose file pre-sets `DATABASE_URL`, `REDIS_URL`, and `NEXT_PUBLIC_APP_URL` for you. The one variable you **must** supply before starting is `BETTER_AUTH_SECRET`:
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+        ```bash
+        # Minimum required variables in app/.env
+        BETTER_AUTH_SECRET=your-cryptographically-random-secret-min-32-chars
+        NODE_ENV=development
+        ```
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+        Generate a strong secret with:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+        ```bash
+        openssl rand -base64 32
+        ```
+      </Step>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+      <Step title="Start all services">
+        ```bash
+        docker-compose up -d
+        ```
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+        This starts four containers: `oasis_db` (PostgreSQL 15), `oasis_redis` (Redis), `oasis_web` (Next.js), and `oasis_worker` (pg-boss worker). The web container waits for healthy database and Redis signals before it starts.
+      </Step>
+
+      <Step title="Run database migrations and seed data">
+        On first run, apply the Prisma schema and load initial seed data:
+
+        ```bash
+        docker-compose exec web npm run db:migrate
+        docker-compose exec web npm run db:seed
+        ```
+
+        <Note>
+          The `db:seed:heavy` command loads approximately 2,500 test clients for load-testing scenarios. Run it only when you need a large dataset — it takes noticeably longer than the standard seed.
+
+          ```bash
+          docker-compose exec web npm run db:seed:heavy
+          ```
+        </Note>
+      </Step>
+
+      <Step title="Open the application">
+        Navigate to [http://localhost:3000](http://localhost:3000). The login page confirms all services are running correctly.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Local Development">
+    Use this path if you already have PostgreSQL and Redis running locally and prefer not to use Docker for the application process.
+
+    <Steps>
+      <Step title="Check prerequisites">
+        Ensure the following are installed and running on your machine:
+
+        - **Node.js 18+** (v20 LTS recommended) — check with `node --version`
+        - **PostgreSQL 14+** — check with `psql --version`
+        - **Redis** — check with `redis-cli ping` (should return `PONG`)
+        - **npm** (bundled with Node.js)
+      </Step>
+
+      <Step title="Install dependencies">
+        ```bash
+        cd app
+        npm install
+        ```
+      </Step>
+
+      <Step title="Configure environment variables">
+        ```bash
+        cp .env.example .env
+        ```
+
+        Open `.env` and fill in your local connection strings:
+
+        ```bash
+        # PostgreSQL — replace with your local credentials
+        DATABASE_URL=postgresql://your_user:your_password@localhost:5432/oasis_db
+        DIRECT_URL=postgresql://your_user:your_password@localhost:5432/oasis_db
+
+        # Redis
+        REDIS_URL=redis://localhost:6379
+
+        # Auth secret — minimum 32 characters
+        BETTER_AUTH_SECRET=your-cryptographically-random-secret-min-32-chars
+
+        # Application URLs
+        NEXT_PUBLIC_APP_URL=http://localhost:3000
+        NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:3000
+
+        NODE_ENV=development
+        ```
+
+        If the `oasis_db` database does not yet exist, create it first:
+
+        ```bash
+        createdb oasis_db
+        ```
+      </Step>
+
+      <Step title="Set up the database">
+        Generate the Prisma client, apply all migrations, then seed reference data:
+
+        ```bash
+        npm run db:generate
+        npm run db:migrate
+        npm run db:seed
+        ```
+      </Step>
+
+      <Step title="Start the development server">
+        ```bash
+        npm run dev
+        ```
+
+        The server starts at [http://localhost:3000](http://localhost:3000) with hot-module replacement enabled. To also run the background worker (required for notification jobs and payment processing):
+
+        ```bash
+        # In a separate terminal, from the /app directory
+        npm run worker:dev
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Default Service Ports
+
+| Service | Port | URL |
+|---|---|---|
+| Web (Next.js) | 3000 | http://localhost:3000 |
+| PostgreSQL | 5432 | postgres://localhost:5432 |
+| Redis | 6379 | redis://localhost:6379 |
+
+## Useful Commands
+
+### Docker
+
+```bash
+# Stream live logs from the web container
+docker-compose logs -f web
+
+# Stream live logs from the background worker
+docker-compose logs -f worker
+
+# Stop all containers (data is preserved)
+docker-compose down
+
+# Stop all containers and delete all volumes (full database reset)
+docker-compose down -v
+```
+
+### Local Development
+
+```bash
+# All commands run from the /app directory
+
+npm run db:seed:heavy    # Load ~2,500 test clients for load testing
+npm run worker:dev       # Start the pg-boss background worker
+npm run lint             # Check code quality
+npm run lint:fix         # Auto-fix lint issues
+npm run build            # Production build
+npm start                # Run the production build locally
+```
+
+<Note>
+  The `db:seed:heavy` command populates the database with approximately 2,500 clients along with associated policies and payment records. It is intended for load testing and performance profiling — not for routine development. Running it after a standard `db:seed` may produce duplicate reference data; use `docker-compose down -v` to reset first.
+</Note>

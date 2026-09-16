@@ -1,0 +1,122 @@
+{
+  "projectType": "saas",
+  "projectName": "OASIS Seguros",
+  "projectDescription": "A full-stack insurance management platform for brokers and agents to manage clients, policies, payments, and automated notifications, built with Next.js, Prisma, and PostgreSQL.",
+  "theme": "almond",
+  "primaryColor": "#2563EB",
+  "lightColor": "#DBEAFE",
+  "darkColor": "#1E3A5F",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "environment-variables"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/clean-architecture",
+              "architecture/database-schema"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/clients",
+              "features/policies",
+              "features/payments",
+              "features/notifications",
+              "features/dashboard"
+            ]
+          },
+          {
+            "group": "Authentication & Access",
+            "pages": [
+              "auth/authentication",
+              "auth/roles-permissions"
+            ]
+          },
+          {
+            "group": "Infrastructure",
+            "pages": [
+              "infrastructure/docker",
+              "infrastructure/workers",
+              "infrastructure/configuration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/server-actions"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/clients",
+              "api/policies",
+              "api/payments"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Client lifecycle management (natural and legal persons) with status tracking (pendiente, activo, moroso)",
+    "Policy management with full state machine (COTIZADA → EN_TRAMITE → PENDIENTE_PAGO → VIGENTE)",
+    "Automatic payment schedule generation based on policy frequency (monthly, quarterly, semi-annual, annual)",
+    "Automated overdue detection via pg-boss background worker running nightly at 2:00 AM",
+    "Multi-channel notifications (Email via Resend/SMTP, SMS via Twilio) with configurable reminder settings",
+    "Role-based access control (admin, agente, supervisor, auditor, operador, cliente) with ABAC scoping",
+    "Clean Architecture with Domain-Driven Design (Domain, Application, Infrastructure layers)",
+    "Comprehensive audit logging for all successful and failed operations",
+    "Docker-based deployment with PostgreSQL 15, Redis, Next.js web app, and background worker",
+    "Dashboard with real-time KPIs: active policies, total clients, overdue payments, monthly revenue"
+  ],
+  "publicApiSurface": [
+    "GET /api/clientes/[id] — Fetch client details with associated policies",
+    "POST /api/auth/[...all] — Better-Auth authentication endpoints (login, session, logout)",
+    "ClienteService.crearCliente(data, userContext)",
+    "ClienteService.obtenerCliente(id)",
+    "ClienteService.actualizarCliente(id, data, userContext)",
+    "ClienteService.eliminarCliente(id, userContext)",
+    "ClienteService.listarClientes(filters, pagination)",
+    "ClienteService.getClientKPIs()",
+    "PolicyService.createPolicy(data, userContext)",
+    "PolicyService.getPolicyById(id)",
+    "PolicyService.listPolicies(filters, pagination, userContext)",
+    "PolicyService.updatePolicy(id, data, userContext)",
+    "PolicyService.cancelPolicy(id, userContext)",
+    "PolicyService.submitForApproval(id, userContext)",
+    "PolicyService.approvePolicy(id, userContext)",
+    "PolicyService.activatePolicy(id, data, userContext)",
+    "PolicyService.renewPolicy(id, userContext)",
+    "PolicyService.getStats(filters, userContext)",
+    "PaymentService.createPayment(data, userContext)",
+    "PaymentService.listPaymentsForUI(params, userContext)",
+    "PaymentService.generateSchedule(policyInfo)",
+    "PaymentService.processOverduePayments()",
+    "DashboardService.getMetrics(filters, userContext)",
+    "DashboardService.getCollectionPriorityList(filters, limit, userContext)",
+    "NotificationService.sendPaymentReminder(params)",
+    "NotificationService.sendOverdueNotice(params)",
+    "NotificationService.sendBatchReminders(payments)",
+    "ConfigurationService.getReminderConfig()",
+    "ConfigurationService.updateReminderConfig(data, userContext)"
+  ]
+}

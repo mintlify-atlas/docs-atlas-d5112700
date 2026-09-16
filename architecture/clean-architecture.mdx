@@ -1,0 +1,370 @@
+---
+title: "Clean Architecture and DDD in OASIS Seguros"
+sidebarTitle: "Clean Architecture"
+description: "How OASIS Seguros implements Clean Architecture with Domain-Driven Design: domain entities, repositories, application services, and infrastructure adapters."
+---
+
+OASIS Seguros structures its business logic using Clean Architecture combined with Domain-Driven Design (DDD). The goal is a strict separation between what the system *does* (business rules), how it *orchestrates* work (use-case services), and how it *talks to the outside world* (databases, email providers, queues). This page explains each layer, shows how they fit together through dependency injection, and traces a real request from a Next.js Server Action down to the database and back.
+
+## The Three Layers
+
+All business code lives under `app/src/lib/` and is divided into three concentric layers. Outer layers may depend on inner ones, but inner layers must never import from outer ones.
+
+```
+app/src/lib/
+├── domain/          ← Layer 1: Pure business logic (no framework deps)
+│   ├── entities/
+│   ├── repositories/   (interfaces only)
+│   └── types/
+├── application/     ← Layer 2: Use-case services, DTOs, mappers
+│   ├── services/
+│   └── dtos/
+└── infrastructure/  ← Layer 3: Prisma, email, SMS, queue
+    ├── database/
+    │   └── repositories/
+    └── external/
+```
+
+### Layer 1 — Domain (`src/lib/domain/`)
+
+The domain layer contains pure TypeScript classes and interfaces with zero runtime dependencies on Next.js, Prisma, or any npm library. It defines:
+
+- **Entities** — Rich objects that encapsulate state and business behaviour (`Cliente`, `Policy`, `Payment`).
+- **Repository interfaces** — Abstract contracts (`IClienteRepository`, `IPolicyRepository`) that the application layer depends on but never implements directly.
+- **Value types and common types** — Shared enums, pagination types, filter shapes, and utility types used across layers.
+
+Because this layer has no external dependencies it is trivially unit-testable and completely framework-agnostic.
+
+### Layer 2 — Application (`src/lib/application/`)
+
+The application layer contains use-case services (`ClienteService`, `PolicyService`, `PaymentService`, `InsurerService`, `ConfigurationService`, `DashboardService`, `NotificationService`). Each service receives its repository and peer-service dependencies via constructor injection and implements all the operations that the UI needs:
+
+- `ClienteService` — create, list, find, update, soft-delete clients; compute KPIs.
+- `PolicyService` — create policies, transition statuses (COTIZADA → EN_TRAMITE → PENDIENTE_PAGO → VIGENTE), list with filters.
+- `PaymentService` — record payments, verify amounts, detect overdue, build payment history.
+- `DashboardService` — aggregate metrics from payment and policy repositories for the dashboard view.
+- `NotificationService` — dispatch email and SMS reminders, log delivery results.
+
+The application layer also owns **DTOs** (Data Transfer Objects) — plain shapes that Server Actions pass in and that mappers convert to domain entities and back.
+
+### Layer 3 — Infrastructure (`src/lib/infrastructure/`)
+
+The infrastructure layer provides concrete implementations of every interface declared in the domain and application layers:
+
+- **Prisma repository implementations** — `ClienteRepository`, `PolicyRepository`, `PaymentRepository`, `InsurerRepository`, `ConfigurationRepository`, `NotificationRepository` — each extends a Prisma model query and maps the result to a domain entity.
+- **External services** — `EmailService` (SMTP via Nodemailer) and `SmsService` (Twilio REST API); both classes handle missing credentials gracefully.
+- **Prisma client** — A singleton `prisma` instance exported from `src/lib/infrastructure/database/prismaClient.ts`.
+
+<Note>
+  Infrastructure code is the **only** place where `import { PrismaClient }` or any third-party SDK should appear. Domain and application code must never reference Prisma types directly.
+</Note>
+
+## Dependency Injection via the Container
+
+All singleton instances are wired together in `src/lib/core/container.ts`. There is no IoC framework — just explicit constructor injection following the Singleton pattern:
+
+```typescript
+// src/lib/core/container.ts (abridged)
+
+// Infrastructure singletons
+const clienteRepository  = new ClienteRepository();
+const policyRepository   = new PolicyRepository();
+const paymentRepository  = new PaymentRepository();
+const insurerRepository  = new InsurerRepository();
+const configurationRepository = new ConfigurationRepository();
+const notificationRepository  = new NotificationRepository();
+
+// Application services — receive their dependencies via constructor
+export const clienteService = new ClienteService(clienteRepository);
+
+export const paymentService = new PaymentService(
+  paymentRepository,
+  policyRepository
+);
+
+export const policyService = new PolicyService(
+  policyRepository,
+  clienteRepository,
+  insurerRepository,
+  paymentService        // cross-service dependency
+);
+
+export const dashboardService = new DashboardService(
+  paymentRepository,
+  policyRepository
+);
+
+const emailService = new EmailService();
+const smsService   = new SmsService();
+
+export const notificationService = new NotificationService(
+  emailService,
+  smsService,
+  notificationRepository,
+  configurationRepository
+);
+```
+
+Server Actions import named exports directly from the container — there is no service locator or global registry:
+
+```typescript
+import { clienteService, policyService } from '@/lib/core/container';
+
+export async function getClientes() {
+  return clienteService.listarClientes({}, { page: 1, limit: 10 }, null);
+}
+```
+
+## Domain Entities
+
+### `Cliente`
+
+Represents an insurance client — either a natural person (`natural`) or a legal entity (`juridica`). The entity encapsulates status-transition logic and identity helpers so that these rules live in one place:
+
+```typescript
+// src/lib/domain/entities/Cliente.ts
+export type ClientStatus = 'pendiente' | 'activo' | 'inactivo' | 'moroso' | 'eliminado';
+
+export interface ClienteProps {
+  id: string;
+  nombre: string | null;
+  apellido: string | null;
+  tipoCliente: 'natural' | 'juridica';
+  cedula: string | null;
+  ruc: string | null;
+  razonSocial: string | null;
+  email: string | null;
+  telefono: string | null;
+  direccion: string | null;
+  status: ClientStatus;
+  assignedAgentId: string | null;
+  totalPolicies: number;
+  policies?: Policy[];
+  // ... timestamps, audit fields
+}
+
+export class Cliente {
+  // Domain methods (selection shown)
+  isPending(): boolean      { return this.status === 'pendiente'; }
+  isActive(): boolean       { return this.status === 'activo'; }
+  isMoroso(): boolean       { return this.status === 'moroso'; }
+  canOperate(): boolean     { return this.status === 'activo' || this.status === 'moroso'; }
+  activate(): void          { this.status = 'activo'; }
+  markAsMoroso(): void      { this.status = 'moroso'; }
+  deactivate(): void        { this.status = 'inactivo'; }
+
+  // Returns razonSocial for juridica, or "nombre apellido" for natural
+  getNombreCompleto(): string | null { ... }
+
+  // Returns RUC for juridica, cédula for natural
+  getIdentificacion(): string | null { ... }
+}
+```
+
+### `Policy`
+
+Represents an insurance policy and models its lifecycle as a finite-state machine (FSM). Guard methods enforce valid transitions:
+
+```typescript
+// src/lib/domain/entities/Policy.ts
+export type PolicyStatus =
+  | 'COTIZADA'       // Quoted — initial state
+  | 'EN_TRAMITE'     // Processing with insurer
+  | 'PENDIENTE_PAGO' // Approved, awaiting first payment
+  | 'VIGENTE'        // Active
+  | 'CANCELADA'      // Cancelled — terminal
+  | 'NO_RENOVADA'    // Expired without renewal — terminal
+  | 'SUSPENDIDA';    // Temporarily suspended
+
+export class Policy {
+  canSubmitForApproval(): boolean { return this.status === 'COTIZADA'; }
+  canBeApproved(): boolean        { return this.status === 'EN_TRAMITE'; }
+  canBeActivated(): boolean       { return this.status === 'PENDIENTE_PAGO'; }
+  isActive(): boolean             { return this.status === 'VIGENTE'; }
+  isTerminal(): boolean {
+    return this.status === 'CANCELADA' || this.status === 'NO_RENOVADA';
+  }
+  // Key financial fields
+  // annualPremium, paymentFrequency, totalPaid, outstandingBalance,
+  // daysOverdue, nextPaymentDate, coverageLimit, deductible
+}
+```
+
+### `Payment`
+
+Represents a single payment record tied to a policy. The entity owns overdue detection and amount classification:
+
+```typescript
+// src/lib/domain/entities/Payment.ts
+export type PaymentStatus =
+  | 'pendiente' | 'pagado' | 'vencido'
+  | 'parcial'   | 'rechazado' | 'cancelado';
+
+export type PaymentMethod =
+  | 'transferencia' | 'tarjeta_credito' | 'efectivo'
+  | 'cheque' | 'automatico' | 'cripto';
+
+export class Payment {
+  isComplete(): boolean  { return Number(this.amountPaid) >= Number(this.amountDue); }
+  isPartial(): boolean   { return Number(this.amountPaid) > 0 && Number(this.amountPaid) < Number(this.amountDue); }
+  isOverdue(): boolean   { /* compares dueDate to today, skips if status === 'pagado' */ }
+  calculateDaysLate(): number { /* returns 0 if not overdue */ }
+  getClassification(): 'completo' | 'parcial' | 'pendiente' { ... }
+  isOwnedByAgent(agentId: string): boolean {
+    return this.policy?.client?.assignedAgentId === agentId;
+  }
+  // Supports blockchain payments: blockchainTransactionHash, qrCodeData
+}
+```
+
+## Repository Pattern
+
+Repository interfaces live in `src/lib/domain/repositories/` and define exactly what operations the application layer may perform on persistent data. Implementations are provided by the infrastructure layer.
+
+### `IClienteRepository`
+
+```typescript
+// src/lib/domain/repositories/IClienteRepository.ts
+export interface IClienteRepository {
+  create(data: CreateClientDto): Promise<Cliente>;
+  findById(id: string): Promise<Cliente | null>;
+  findAll(
+    filters: ClienteFilters,
+    pagination: PaginationParams
+  ): Promise<PaginatedResult<Cliente>>;
+  findByCedula(cedula: string): Promise<Cliente | null>;
+  findByEmail(email: string): Promise<Cliente | null>;
+  update(id: string, data: UpdateClientDto): Promise<Cliente | null>;
+  delete(id: string): Promise<boolean>;
+  softDelete(id: string): Promise<Cliente | null>;
+  exists(criteria: ClienteExistsCriteria): Promise<boolean>;
+  getKPIs(): Promise<{
+    total: number;
+    active: number;
+    inactive: number;
+    pending: number;
+    moroso: number;
+  }>;
+}
+```
+
+### `IPolicyRepository`
+
+```typescript
+// src/lib/domain/repositories/IPolicyRepository.ts
+export interface IPolicyRepository {
+  create(data: CreatePolicyDto): Promise<Policy>;
+  findById(id: string): Promise<Policy | null>;
+  findByPolicyNumber(policyNumber: string, insurerId: string): Promise<Policy | null>;
+  findAll(
+    filters: PolicyFilters,
+    pagination: PaginationParams
+  ): Promise<PaginatedResult<Policy>>;
+  update(id: string, data: UpdatePolicyDto): Promise<Policy | null>;
+  markAsCancelled(id: string, metadata: CancellationMetadata): Promise<Policy | null>;
+  getStats(filters: PolicyFilters): Promise<PolicyStats>;
+}
+```
+
+<Tip>
+  When adding a new data operation, define it here in the interface first, then implement it in `src/lib/infrastructure/database/repositories/`. The application service will automatically pick up the new method without any container changes.
+</Tip>
+
+## Request Flow: Server Action → Database
+
+The following steps trace how a "list clients" request moves through every layer:
+
+<Steps>
+  <Step title="Server Action (Presentation Layer)">
+    A Next.js Server Action imports the pre-wired service from the container and calls it with the incoming filter and pagination parameters.
+
+    ```typescript
+    // src/app/(dashboard)/clients/actions.ts
+    import { clienteService } from '@/lib/core/container';
+
+    export async function listClientes(
+      filters: ClienteFilters,
+      pagination: PaginationParams
+    ) {
+      return clienteService.listarClientes(filters, pagination, userContext);
+    }
+    ```
+  </Step>
+
+  <Step title="Application Service (Use-Case Layer)">
+    `ClienteService.listarClientes` applies any business rules (e.g., agents may only see their own clients), builds a validated filter, and delegates to the repository interface.
+
+    ```typescript
+    // src/lib/application/services/ClienteService.ts
+    class ClienteService {
+      constructor(private repo: IClienteRepository) {}
+
+      async listarClientes(
+        filters: ClienteFilters,
+        pagination: PaginationParams,
+        userContext: UserContext | null
+      ): Promise<PaginatedResult<Cliente>> {
+        // Scope filter to agent if role is 'agente'
+        const scopedFilters = applyAgentScope(filters, userContext);
+        return this.repo.findAll(scopedFilters, pagination);
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Repository Implementation (Infrastructure Layer)">
+    `ClienteRepository.findAll` translates the domain filter into a Prisma `where` clause, runs the query, and maps each Prisma record to a `Cliente` domain entity.
+
+    ```typescript
+    // src/lib/infrastructure/database/repositories/ClienteRepository.ts
+    class ClienteRepository implements IClienteRepository {
+      async findAll(
+        filters: ClienteFilters,
+        pagination: PaginationParams
+      ): Promise<PaginatedResult<Cliente>> {
+        const where = buildWhereClause(filters);
+        const [records, total] = await Promise.all([
+          prisma.client.findMany({ where, skip, take, include: { ... } }),
+          prisma.client.count({ where }),
+        ]);
+        return {
+          data: records.map(mapPrismaClientToEntity),
+          total,
+          page: pagination.page,
+          limit: pagination.limit,
+        };
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Domain Entity">
+    The mapper constructs a `Cliente` entity from the raw Prisma record. From this point on, callers work exclusively with the domain entity and its methods — never with Prisma types.
+  </Step>
+</Steps>
+
+## Summary
+
+| Layer | Location | Depends on | Never imports |
+|---|---|---|---|
+| Domain | `src/lib/domain/` | Nothing | Prisma, Next.js, any SDK |
+| Application | `src/lib/application/` | Domain interfaces | Prisma, Next.js |
+| Infrastructure | `src/lib/infrastructure/` | Domain + Application | — |
+| Presentation | `src/app/`, `src/components/` | Container exports | Repository implementations |
+
+<CardGroup cols={2}>
+  <Card
+    title="Architecture Overview"
+    icon="sitemap"
+    href="/architecture/overview"
+  >
+    System diagram, component table, and key technology decisions.
+  </Card>
+  <Card
+    title="Database Schema"
+    icon="database"
+    href="/architecture/database-schema"
+  >
+    Multi-schema PostgreSQL design, Prisma models, enums, and migration commands.
+  </Card>
+</CardGroup>

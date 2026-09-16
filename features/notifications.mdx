@@ -1,0 +1,186 @@
+---
+title: "Automated Notifications: Email and SMS in OASIS Seguros"
+sidebarTitle: "Notifications"
+description: "OASIS Seguros sends automated payment reminders and overdue notices via Email (Resend/SMTP) and SMS (Twilio) with configurable reminder rules."
+---
+
+OASIS Seguros delivers automated payment reminders and overdue alerts to clients through two independent channels: **Email** (via Resend or a standard SMTP relay) and **SMS** (via Twilio). Both channels are managed by `NotificationService`, which reads its behaviour from a system-wide `ReminderConfig` stored in the database and updated through `ConfigurationService`. Delivery events are persisted in `EmailLog` and `SmsLog` tables for full audit and reporting.
+
+## Notification Channels
+
+| Channel | Provider | Required environment variables |
+|---|---|---|
+| Email | Resend | `RESEND_API_KEY` |
+| Email (fallback) | SMTP relay | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` |
+| SMS | Twilio | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` |
+
+<Warning>
+  If `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, or `TWILIO_PHONE_NUMBER` are not set, all SMS notifications will fail silently. Similarly, `RESEND_API_KEY` or valid SMTP credentials are required for email delivery. At least one channel must be enabled in the `ReminderConfig` for any notification to be dispatched.
+</Warning>
+
+## Notification Types
+
+<CardGroup cols={2}>
+  <Card title="Payment Reminder" icon="bell">
+    Sent when a payment's `dueDate` is approaching. The number of days in advance is governed by `daysBeforeDue` in `ReminderConfig`. Dispatched via `sendPaymentReminder()`.
+  </Card>
+  <Card title="Overdue Notice" icon="triangle-exclamation">
+    Sent when a payment is past its `dueDate`. Triggered by the nightly `processOverduePayments()` background worker. Dispatched via `sendOverdueNotice()`.
+  </Card>
+</CardGroup>
+
+## Reminder Configuration
+
+Notification behaviour is controlled by the `ReminderConfig` object, managed through `ConfigurationService.updateReminderConfig()`:
+
+| Field | Type | Description |
+|---|---|---|
+| `daysBeforeDue` | `number` | How many days before the due date to send a reminder |
+| `sendTime` | `string` | Time of day to send (e.g. `"09:00"`) |
+| `emailEnabled` | `boolean` | Whether to send email reminders |
+| `smsEnabled` | `boolean` | Whether to send SMS reminders |
+
+```typescript
+import { configurationService } from '@/lib/core/container';
+
+await configurationService.updateReminderConfig({
+  daysBeforeDue: 3,        // Remind 3 days before due date
+  sendTime: '09:00',       // Send at 9 AM
+  emailEnabled: true,      // Enable email channel
+  smsEnabled: true,        // Enable SMS channel
+});
+```
+
+<Note>
+  At least one of `emailEnabled` or `smsEnabled` must be `true`. If both are `false`, `sendPaymentReminder()` and `sendOverdueNotice()` return immediately with `{ skipped: true, reason: 'No channels enabled' }`.
+</Note>
+
+## NotificationService Methods
+
+### `sendPaymentReminder(params)`
+
+Sends a payment reminder for an upcoming installment. Reads `ReminderConfig` from the database (or uses a pre-fetched `config` override for batch efficiency).
+
+```typescript
+interface NotificationParams {
+  client:  Cliente;  // Must have .email and/or .telefono
+  payment: Payment;  // Must have .dueDate and .amountDue
+  policy:  Policy;   // Must have .policyNumber and .policyType
+  config?: ReminderConfig; // Optional pre-fetched config (avoids repeated DB reads in batch)
+}
+
+const result = await notificationService.sendPaymentReminder({ client, payment, policy });
+// result.email → { success: boolean, error?: string } | null
+// result.sms   → { success: boolean, error?: string } | null
+// result.skipped → true if both channels disabled
+```
+
+The service derives:
+- **Client name**: `razonSocial` for `juridica` type; `nombre + apellido` for `natural` type.
+- **Days until due**: computed from `payment.dueDate` vs today.
+- **Amount**: `Number(payment.amountDue)`.
+
+### `sendOverdueNotice(params)`
+
+Sends an overdue alert after a payment has passed its due date. Calculates `daysOverdue` automatically.
+
+```typescript
+const result = await notificationService.sendOverdueNotice({ client, payment, policy });
+// Same NotificationResult shape as sendPaymentReminder
+```
+
+### `sendBatchReminders(payments[])`
+
+Processes multiple payments in a loop, sharing a single `ReminderConfig` read for the entire batch.
+
+```typescript
+const results = await notificationService.sendBatchReminders([
+  { client: client1, payment: payment1, policy: policy1 },
+  { client: client2, payment: payment2, policy: policy2 },
+]);
+
+// results.total         → total items processed
+// results.emailsSent    → successful email dispatches
+// results.emailsFailed  → failed email dispatches
+// results.smsSent       → successful SMS dispatches
+// results.smsFailed     → failed SMS dispatches
+// results.errors        → [{ paymentId, channel?, error }]
+```
+
+### `getCommunicationHistory(clientId, pagination)`
+
+Returns a paginated log of all notifications sent to a specific client, drawn from `EmailLog` and `SmsLog`.
+
+```typescript
+const history = await notificationService.getCommunicationHistory(
+  'client-uuid',
+  { page: 1, limit: 20 }
+);
+```
+
+Pass `null` as `clientId` to retrieve the global history (admin only).
+
+### `getCommunicationStats(from, to)`
+
+Returns aggregate channel statistics (sent, delivered, opened, bounced) for a date range.
+
+```typescript
+const stats = await notificationService.getCommunicationStats(
+  new Date('2025-01-01'),
+  new Date('2025-03-31')
+);
+```
+
+## Notification Delivery Tracking
+
+Every dispatched notification is recorded in the database:
+
+| Model | Tracks |
+|---|---|
+| `EmailLog` | Sent, delivered, opened, bounced status; `errorMessage` on failure |
+| `SmsLog` | Sent, delivered, failed status; `errorMessage` on failure |
+
+You can retrieve the current delivery status of a specific log entry with:
+
+```typescript
+const status = await notificationService.getNotificationStatus(logId, 'email');
+// or
+const status = await notificationService.getNotificationStatus(logId, 'sms');
+// { status: string, error: string | null }
+```
+
+## Testing Channels
+
+Before going live, you can verify connectivity for each channel:
+
+<Tabs>
+  <Tab title="Email">
+    ```typescript
+    const result = await notificationService.testEmailChannel('admin@oasis-seguros.ec');
+    // { success: true } or { success: false, error: '...' }
+    ```
+  </Tab>
+  <Tab title="SMS">
+    ```typescript
+    const result = await notificationService.testSmsChannel('+593987654321');
+    // { success: true } or { success: false, error: '...' }
+    ```
+  </Tab>
+</Tabs>
+
+## Notification Flow: Reminder Lifecycle
+
+<Steps>
+  <Step title="Scheduler triggers reminder job">
+    A pg-boss cron job fires at the configured `sendTime`, querying for payments due within the next `daysBeforeDue` days.
+  </Step>
+  <Step title="sendBatchReminders() called">
+    The job passes the payment list to `NotificationService.sendBatchReminders()`. Config is fetched once from the database.
+  </Step>
+  <Step title="Per-channel dispatch">
+    For each payment, `sendPaymentReminder()` delegates to `IEmailService.sendPaymentReminder()` and/or `ISmsService.sendPaymentReminder()` based on `emailEnabled` / `smsEnabled` flags.
+  </Step>
+  <Step title="Log and report">
+    Results are written to `EmailLog` / `SmsLog`. The batch summary (sent, failed, errors) is returned for monitoring.
+  </Step>
+</Steps>

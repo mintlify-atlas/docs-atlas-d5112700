@@ -1,0 +1,284 @@
+---
+title: "Payment Service API Methods in OASIS Seguros"
+sidebarTitle: "Payments API"
+description: "Reference for PaymentService methods: record payments, list with filters, generate schedules, and process overdue installments automatically."
+---
+
+`PaymentService` is OASIS Seguros's internal application-layer service for managing insurance premium payments. It is a TypeScript class instantiated in the DI container (`src/lib/core/container.ts`) and is **not exposed directly over HTTP** — it is called from Server Actions, Server Components, and the background worker. The service enforces ABAC rules (agents only see payments for their assigned clients), auto-classifies payment status based on amounts, calculates days late, and maintains running totals on the parent policy.
+
+---
+
+## `createPayment(data, userContext)`
+
+Records a new payment against an existing policy. The service automatically:
+- Classifies `paymentStatus` as `pagado`, `parcial`, or `pendiente` based on `amount_paid` vs `amount_due`.
+- Calculates `paymentDaysLate` between `due_date` and `payment_date`.
+- Updates the parent policy's `total_paid`, `outstanding_balance`, and `last_payment_date`.
+- Generates a unique `paymentReference` from the repository sequence.
+
+**Input — `CreatePaymentDto`:**
+
+<ParamField body="policy_id" type="string" required>
+  UUID of the policy this payment applies to.
+</ParamField>
+
+<ParamField body="payment_method" type="string" required>
+  Payment method: `transferencia` | `tarjeta_credito` | `efectivo` | `cheque` | `automatico` | `cripto`.
+</ParamField>
+
+<ParamField body="amount_paid" type="number" required>
+  Amount actually paid. Must be positive. Cannot exceed `amount_due × 1.05` (5% overpayment tolerance).
+</ParamField>
+
+<ParamField body="amount_due" type="number" required>
+  Amount originally owed for this installment. Must be positive.
+</ParamField>
+
+<ParamField body="due_date" type="string" required>
+  Installment due date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField body="payment_date" type="string" required>
+  Date payment was received in `YYYY-MM-DD` format. Defaults to today if omitted.
+</ParamField>
+
+<ParamField body="payer_name" type="string">
+  Full name of the payer. Defaults to the policy's `policyHolderName` if not provided. Minimum 2 characters.
+</ParamField>
+
+<ParamField body="receipt_number" type="string">
+  External receipt or transaction reference number.
+</ParamField>
+
+<ParamField body="currency_code" type="string">
+  ISO 4217 currency code. Must be exactly 3 characters. Defaults to `USD`.
+</ParamField>
+
+<ParamField body="payment_reference" type="string">
+  Manual payment reference override. If omitted, the service generates a sequential reference automatically.
+</ParamField>
+
+<ParamField body="payment_status" type="string">
+  Override the auto-classified status. One of `pendiente` | `pagado` | `vencido` | `parcial` | `rechazado` | `cancelado`.
+</ParamField>
+
+<ParamField body="payment_days_late" type="number">
+  Override the auto-calculated days late. Must be a non-negative integer.
+</ParamField>
+
+**Auto-classification logic:**
+
+| Condition | Assigned `paymentStatus` |
+|---|---|
+| `amount_paid >= amount_due` | `pagado` |
+| `0 < amount_paid < amount_due` | `parcial` |
+| `amount_paid == 0` | `pendiente` |
+
+**Returns:** `Promise<Payment>`
+
+**Throws:**
+- `AppError(404)` — if `policy_id` does not exist.
+- `AppError(403)` — if the calling `agente` user is not assigned to the policy's client.
+- `AppError(500)` — if the payment record could not be persisted.
+
+---
+
+## `listPaymentsForUI(params, userContext)`
+
+Returns a paginated, serialized list of payments optimised for UI consumption. Executes a Prisma `$transaction` for consistent `count + findMany` pagination. ABAC is enforced: users with the `agente` role only see payments for policies whose client has `assignedAgentId === userContext.id`.
+
+**Input — `PaymentListParams`:**
+
+<ParamField body="page" type="number">
+  Page number (1-based). Defaults to `1`.
+</ParamField>
+
+<ParamField body="limit" type="number">
+  Items per page. Maximum `100`. Defaults to `10`.
+</ParamField>
+
+<ParamField body="status" type="array">
+  Filter by one or more payment statuses. Valid values: `pendiente` | `pagado` | `vencido` | `parcial` | `rechazado` | `cancelado`.
+</ParamField>
+
+<ParamField body="policyId" type="string">
+  UUID — restrict results to payments for a specific policy.
+</ParamField>
+
+<ParamField body="dateFrom" type="string">
+  ISO date string — lower bound filter on `paymentDate`.
+</ParamField>
+
+<ParamField body="dateTo" type="string">
+  ISO date string — upper bound filter on `paymentDate`.
+</ParamField>
+
+<ParamField body="q" type="string">
+  Full-text search string (case-insensitive). Matches across:
+  - `paymentReference`
+  - `receiptNumber`
+  - `payerName`
+  - `policyNumber` (via join)
+  - Client `firstName`, `lastName`, `companyName`, `email` (via nested join)
+</ParamField>
+
+**Returns:** `Promise<PaymentListResponseDTO>`
+
+```typescript
+interface PaymentListResponseDTO {
+  data: PaymentListItemDTO[];
+  pagination: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  };
+}
+
+interface PaymentListItemDTO {
+  id: string;
+  paymentReference: string;
+  paymentDate: string | null;        // ISO 8601
+  paymentMethod: string;
+  paymentStatus: string;
+  dueDate: string;                   // ISO 8601
+  amountDue: number;
+  amountPaid: number;
+  amountRemaining: number;
+  currencyCode: string;
+  payerName: string | null;
+  receiptNumber: string | null;
+  paymentDaysLate: number;
+  policy: {
+    id: string;
+    policyNumber: string;
+    policyHolderName: string | null;
+  } | null;
+  client: {
+    id: string;
+    nombre: string | null;
+    email: string | null;
+    assignedAgentId: string | null;
+  } | null;
+  createdAt: string;                 // ISO 8601
+  updatedAt: string;                 // ISO 8601
+}
+```
+
+<Note>
+  All `Date` fields are serialized to ISO 8601 strings in `PaymentListItemDTO`. Prisma `Decimal` fields are converted to `number`. This ensures the response is safe to return from a Server Action without serialization errors.
+</Note>
+
+---
+
+## `generateSchedule(policyInfo)`
+
+Generates the full payment installment schedule for a policy and persists each installment as a `Payment` record with `paymentStatus: 'pendiente'`. Payment references are formatted as `<policyNumber>-<installmentNumber>` (e.g. `POL-2025-001-01`, `POL-2025-001-02`, …).
+
+This method is called automatically by `PolicyService.activatePolicy()` — you do not need to call it manually when activating a policy through the standard workflow.
+
+**Input — `PolicyInfo`:**
+
+<ParamField body="id" type="string" required>
+  UUID of the policy.
+</ParamField>
+
+<ParamField body="policyNumber" type="string" required>
+  Policy number used as the prefix in payment references.
+</ParamField>
+
+<ParamField body="startDate" type="Date" required>
+  Policy start date. Used as the base for schedule generation.
+</ParamField>
+
+<ParamField body="endDate" type="Date" required>
+  Policy end date. Determines the number of installments.
+</ParamField>
+
+<ParamField body="paymentFrequency" type="string" required>
+  Cadence: `mensual` | `trimestral` | `semestral` | `anual`.
+</ParamField>
+
+<ParamField body="monthlyPremium" type="number | string" required>
+  Monthly premium amount. Used to calculate each installment's `amountDue`.
+</ParamField>
+
+<ParamField body="policyHolderName" type="string">
+  Used as `payerName` on generated installments.
+</ParamField>
+
+<ParamField body="totalPaid" type="number | string">
+  Running total of payments already received (used when checking outstanding balance).
+</ParamField>
+
+<ParamField body="annualPremium" type="number | string">
+  Annual premium (used for outstanding balance calculations).
+</ParamField>
+
+<ParamField body="updatedBy" type="string">
+  UUID of the user triggering schedule generation (stored as `created_by` / `updated_by` on installments).
+</ParamField>
+
+<ParamField body="client.assignedAgentId" type="string">
+  UUID of the agent assigned to this policy's client (for ABAC scoping).
+</ParamField>
+
+**Returns:** `Promise<Payment[]>` — the array of created installment records.
+
+**Throws:** `AppError(400)` — `"Faltan datos requeridos para generar el cronograma de pagos"` if `startDate`, `endDate`, `paymentFrequency`, or `monthlyPremium` is missing.
+
+---
+
+## `processOverduePayments()`
+
+Batch-processes all payments that are past their `due_date` and still in `pendiente` status. For each overdue payment, the service:
+1. Calculates `daysLate` from the payment's `dueDate` to today.
+2. Calls `paymentRepository.markAsOverdue(payment.id, daysLate)` — sets `paymentStatus` to `vencido`.
+3. Sends an overdue notification via `notificationService.sendOverdueNotice()` to the client.
+
+<Warning>
+  This method is called automatically by the background worker every night at **2:00 AM**. Do not call it manually in request handlers — it is intended for scheduled batch execution only.
+</Warning>
+
+**Returns:** `Promise<{ processed: number; errors: number }>`
+
+| Field | Description |
+|---|---|
+| `processed` | Number of payments successfully marked as overdue and notified. |
+| `errors` | Number of payments that encountered an error during processing (logged individually, does not stop the batch). |
+
+---
+
+## TypeScript Usage Example
+
+```typescript
+// In a Server Action or Server Component
+import { paymentService } from '@/lib/core/container';
+
+// Record a payment
+const payment = await paymentService.createPayment({
+  policy_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+  payment_method: 'transferencia',
+  amount_paid: 100.00,
+  amount_due: 100.00,
+  due_date: '2025-02-01',
+  payment_date: '2025-02-01',
+  payer_name: 'Juan Pérez',
+  receipt_number: 'REC-2025-0042',
+  currency_code: 'USD',
+}, userContext);
+
+// payment.paymentStatus === 'pagado'
+// parent policy total_paid and outstanding_balance are updated automatically
+
+// List payments with search
+const result = await paymentService.listPaymentsForUI({
+  page: 1,
+  limit: 10,
+  status: ['pendiente', 'vencido'],
+  q: 'Juan',
+}, userContext);
+
+console.log(result.pagination.total);   // total matching records
+console.log(result.data[0].dueDate);    // ISO 8601 string
+```

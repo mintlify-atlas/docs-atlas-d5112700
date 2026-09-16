@@ -1,0 +1,126 @@
+---
+title: "Managing Clients in OASIS Seguros"
+sidebarTitle: "Clients"
+description: "How OASIS Seguros handles client lifecycle management for natural persons and legal entities, including status tracking, KPIs, and search."
+---
+
+OASIS Seguros models every insured party as a **Cliente** — a first-class domain entity that tracks identity, contact details, assigned agent, and a lifecycle status. Clients are created before any policy is issued and remain in the system permanently via soft-deletion. The service layer (`ClienteService`) enforces uniqueness of national identifiers and email addresses and exposes operations for full CRUD, filtered listing, and portfolio KPIs.
+
+## Client Types
+
+OASIS Seguros supports two kinds of insured parties, distinguished by the `tipoCliente` field on the `Cliente` entity.
+
+<CardGroup cols={2}>
+  <Card title="Natural Person (natural)" icon="user">
+    Individual policyholders. Identified by their **cédula** (Ecuadorian national ID, 10 digits). Display name is built from `nombre` + `apellido`.
+  </Card>
+  <Card title="Legal Entity (juridica)" icon="building">
+    Companies and organisations. Identified by their **RUC** (13-digit tax number). Display name comes from `razonSocial`.
+  </Card>
+</CardGroup>
+
+The helper `getIdentificacion()` on the `Cliente` entity returns the correct identifier based on `tipoCliente`, and `getNombreCompleto()` returns the appropriate display name.
+
+## Client Status Lifecycle
+
+Every client moves through a well-defined set of statuses stored in the `status` field (`ClientStatus` type).
+
+| Status | Description |
+|---|---|
+| `pendiente` | Newly registered client — no active policy yet. Default on creation. |
+| `activo` | Has at least one active (`VIGENTE`) policy. |
+| `moroso` | Has one or more overdue payments (`vencido`). |
+| `inactivo` | All policies have lapsed or been cancelled; no outstanding debt. |
+| `eliminado` | Soft-deleted; `deletedAt` is set. Not returned in normal listings. |
+
+### Automatic Status Transition on First Policy Activation
+
+When `PolicyService.activatePolicy()` transitions a policy to `VIGENTE`, it inspects the owning client. If the client is currently in `pendiente` state — meaning this is their first active policy — the system automatically calls `clienteRepository.update(clientId, { status: 'activo' })`.
+
+```
+pendiente ──(first policy activated to VIGENTE)──► activo
+```
+
+This **Fase de Vinculación Comercial** transition is handled entirely server-side and requires no manual intervention.
+
+## Key Operations
+
+`ClienteService` exposes the following public methods. All write operations accept a `UserContext` parameter for audit tracking (`createdBy` / `updatedBy`).
+
+<CardGroup cols={2}>
+  <Card title="crearCliente" icon="user-plus">
+    Creates a new client after validating that the `cedula`, `ruc`, and `email` are not already in use. Throws `AppError 409` on duplicates.
+  </Card>
+  <Card title="obtenerCliente" icon="magnifying-glass">
+    Fetches a single client by UUID. Throws `AppError 404` if not found.
+  </Card>
+  <Card title="actualizarCliente" icon="pen-to-square">
+    Partially updates a client. Re-validates `cedula` uniqueness if the field is being changed.
+  </Card>
+  <Card title="eliminarCliente" icon="trash">
+    Sets `deletedAt` and `status = eliminado` via `softDelete()`. The record remains in the database.
+  </Card>
+  <Card title="listarClientes" icon="list">
+    Returns a paginated list filtered by `ClienteFilters`. Supports text search, status filter, and agent scoping.
+  </Card>
+  <Card title="getClientKPIs" icon="chart-bar">
+    Returns aggregate counts: `total`, `active`, `inactive`, `pending`, and `moroso` clients.
+  </Card>
+</CardGroup>
+
+## Filters Available When Listing Clients
+
+The `ClienteFilters` type accepted by `listarClientes` supports the following optional fields:
+
+| Filter | Type | Description |
+|---|---|---|
+| `status` | `ClientStatus \| ClientStatus[]` | Filter by one or more lifecycle statuses |
+| `tipoCliente` | `'natural' \| 'juridica'` | Filter by client type |
+| `assignedAgentId` | `string` | Scope results to a specific agent's portfolio |
+| `q` | `string` | Free-text search across name, email, cedula/RUC |
+| `deletedAt` | Presence check | Exclude or include soft-deleted records |
+
+Pagination is controlled separately via `PaginationParams` (`page`, `limit`).
+
+## TypeScript Example: Creating a Client
+
+```typescript
+import { clienteService } from '@/lib/core/container';
+import type { CreateClientDto } from '@/lib/application/dtos/ClienteDTO';
+import type { UserContext } from '@/lib/shared/types/UserContext';
+
+const newClientData: CreateClientDto = {
+  tipoCliente: 'natural',
+  nombre: 'María',
+  apellido: 'Pérez',
+  cedula: '1713456789',
+  email: 'maria.perez@ejemplo.ec',
+  telefono: '+593987654321',
+  direccion: 'Av. Amazonas N21-147, Quito',
+};
+
+const userCtx: UserContext = { id: 'agent-uuid', role: 'agente' };
+
+try {
+  const cliente = await clienteService.crearCliente(newClientData, userCtx);
+  console.log('Cliente creado:', cliente.id, cliente.getNombreCompleto());
+} catch (error) {
+  // AppError 409 if cedula, ruc, or email already exists
+  console.error(error);
+}
+```
+
+<Note>
+  For legal entities (`juridica`), provide `ruc` and `razonSocial` instead of `cedula`, `nombre`, and `apellido`. The `getIdentificacion()` method will automatically return the correct identifier.
+</Note>
+
+## UI Pages
+
+<CardGroup cols={2}>
+  <Card title="/clientes" icon="users">
+    Paginated client list with search, status badge filters, and quick KPI counters at the top. Agents see only their assigned clients via ABAC scoping.
+  </Card>
+  <Card title="/clientes/[id]" icon="id-card">
+    Client detail view showing personal information, associated policies, payment history summary, and status management actions.
+  </Card>
+</CardGroup>

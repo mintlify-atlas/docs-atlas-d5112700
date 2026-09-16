@@ -1,0 +1,314 @@
+---
+title: "Policy Service API Methods in OASIS Seguros"
+sidebarTitle: "Policies API"
+description: "Reference for PolicyService methods used in server actions and server components: create, list, update, state transitions, renewal, and statistics."
+---
+
+`PolicyService` is OASIS Seguros's internal application-layer service for insurance policy management. It is **not an HTTP API** — it is a TypeScript class instantiated in the dependency injection container (`src/lib/core/container.ts`) and called from Server Actions, Server Components, and other services. All public methods accept an optional `UserContext` for ABAC (Attribute-Based Access Control) enforcement and audit trails.
+
+<Note>
+  To trigger policy operations from outside the Next.js application, you must build a dedicated REST route that delegates to `PolicyService`. The Server Actions that wrap these methods are also not externally callable.
+</Note>
+
+---
+
+## `createPolicy(data, userContext)`
+
+Creates a new insurance policy after validating that the referenced client and insurer exist. If the policy is created directly in `VIGENTE` status, a payment installment schedule is automatically generated via `PaymentService.generateSchedule()`.
+
+**Input — `CreatePolicyDto`:**
+
+<ParamField body="policy_number" type="string" required>
+  Unique policy number. Minimum 3 characters.
+</ParamField>
+
+<ParamField body="policy_type" type="string" required>
+  Policy type (e.g. `Vida`, `Vehicular`, `Salud`). Minimum 3 characters.
+</ParamField>
+
+<ParamField body="client_id" type="string" required>
+  UUID of the client. Validated against the client repository.
+</ParamField>
+
+<ParamField body="insurer_id" type="string" required>
+  UUID of the insurance company. Validated against the insurer repository.
+</ParamField>
+
+<ParamField body="start_date" type="string" required>
+  Policy start date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField body="end_date" type="string" required>
+  Policy end date in `YYYY-MM-DD` format. Must be after `start_date`.
+</ParamField>
+
+<ParamField body="payment_frequency" type="string" required>
+  Payment cadence: `mensual` | `trimestral` | `semestral` | `anual`.
+</ParamField>
+
+<ParamField body="annual_premium" type="number" required>
+  Annual premium. Must be a positive number.
+</ParamField>
+
+<ParamField body="monthly_premium" type="number">
+  Monthly premium. Must be a positive number.
+</ParamField>
+
+<ParamField body="coverage_limit" type="number">
+  Maximum coverage amount. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="deductible" type="number">
+  Deductible amount. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="policy_holder_name" type="string">
+  Full name of the insured person or entity.
+</ParamField>
+
+<ParamField body="product_name" type="string">
+  Commercial product name.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Free-form policy description.
+</ParamField>
+
+<ParamField body="insured_object_description" type="string">
+  Description of the insured object (vehicle plate, property address, etc.).
+</ParamField>
+
+<ParamField body="renewal_date" type="string">
+  Optional scheduled renewal date in `YYYY-MM-DD` format.
+</ParamField>
+
+<ParamField body="beneficiaries" type="object | array">
+  Beneficiary data as a JSON object or array.
+</ParamField>
+
+<ParamField body="special_conditions" type="object | array">
+  Special policy conditions as a JSON object or array.
+</ParamField>
+
+**Returns:** `Promise<Policy>`
+
+**Throws:**
+- `AppError(404)` if `client_id` or `insurer_id` does not exist.
+
+---
+
+## `getPolicyById(id)`
+
+Retrieves a single policy by its UUID.
+
+<ParamField path="id" type="string" required>
+  UUID of the policy.
+</ParamField>
+
+**Returns:** `Promise<Policy>`
+
+**Throws:** `AppError(404)` — `"Póliza no encontrada"` if no policy matches.
+
+---
+
+## `listPolicies(filters, pagination, userContext)`
+
+Returns a paginated list of policies matching the given filters. No ABAC filtering is applied inside the service itself — scoping by agent is handled at the repository layer when a `UserContext` is provided.
+
+**Filters — `PolicyFilters`:**
+
+<ParamField body="clientId" type="string">
+  Filter by client UUID.
+</ParamField>
+
+<ParamField body="status" type="string">
+  Filter by policy status (e.g. `VIGENTE`, `COTIZADA`).
+</ParamField>
+
+<ParamField body="insurerId" type="string">
+  Filter by insurer UUID.
+</ParamField>
+
+<ParamField body="assignedAgentId" type="string">
+  Filter by the UUID of the agent assigned to the policy's client.
+</ParamField>
+
+<ParamField body="dateFrom" type="string">
+  ISO date — lower bound for policy `start_date`.
+</ParamField>
+
+<ParamField body="dateTo" type="string">
+  ISO date — upper bound for policy `start_date`.
+</ParamField>
+
+**Pagination — `PaginationParams`:**
+
+<ParamField body="page" type="number">
+  Page number (1-based).
+</ParamField>
+
+<ParamField body="limit" type="number">
+  Number of records per page.
+</ParamField>
+
+**Returns:** `Promise<PaginatedResult<Policy>>`
+
+---
+
+## `updatePolicy(id, data, userContext)`
+
+Applies a partial update to an existing policy. All fields in `UpdatePolicyDto` are optional.
+
+<ParamField path="id" type="string" required>
+  UUID of the policy to update.
+</ParamField>
+
+**Input — `UpdatePolicyDto`** (all fields optional):
+
+Accepts all `CreatePolicyDto` fields as optional, plus:
+
+<ParamField body="status" type="string">
+  Target status: `COTIZADA` | `EN_TRAMITE` | `PENDIENTE_PAGO` | `VIGENTE` | `CANCELADA` | `NO_RENOVADA` | `SUSPENDIDA`.
+</ParamField>
+
+<ParamField body="issue_date" type="string | Date">
+  Official issue date of the policy document.
+</ParamField>
+
+<ParamField body="total_paid" type="number">
+  Running total of all payments received. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="outstanding_balance" type="number">
+  Remaining balance. Must be ≥ 0.
+</ParamField>
+
+<ParamField body="last_payment_date" type="string | Date">
+  Date of the last payment received.
+</ParamField>
+
+<ParamField body="updated_by" type="string">
+  UUID of the user performing the update (for audit).
+</ParamField>
+
+**Returns:** `Promise<Policy>`
+
+**Throws:** `AppError(404)` if the policy does not exist; `AppError(500)` if the update fails.
+
+---
+
+## State Transition Methods
+
+OASIS Seguros enforces a strict policy lifecycle state machine. Attempting a transition from an invalid source state throws `AppError(400)`.
+
+```
+COTIZADA → EN_TRAMITE → PENDIENTE_PAGO → VIGENTE
+                     ↓                   ↓
+                  CANCELADA          CANCELADA
+                                     NO_RENOVADA (after renewal)
+```
+
+### `submitForApproval(id, userContext)`
+
+Transitions a policy from **COTIZADA → EN_TRAMITE**.
+
+**Throws:** `AppError(400)` — `"Solo pólizas en estado COTIZADA pueden enviarse a aprobación"` if the current status is not `COTIZADA`.
+
+---
+
+### `approvePolicy(id, userContext)`
+
+Transitions a policy from **EN_TRAMITE → PENDIENTE_PAGO**.
+
+**Throws:** `AppError(400)` — `"Solo pólizas en estado EN_TRAMITE pueden ser aprobadas"` if the current status is not `EN_TRAMITE`.
+
+---
+
+### `activatePolicy(id, data, userContext)`
+
+Transitions a policy from **PENDIENTE_PAGO or EN_TRAMITE → VIGENTE**.
+
+On success, two side-effects fire automatically:
+1. **Client auto-activation:** If the policy's client is currently in `pendiente` status, the client is updated to `activo` (Commercial Onboarding phase).
+2. **Payment schedule generation:** `PaymentService.generateSchedule()` is called to create the full installment schedule based on `paymentFrequency` and `monthlyPremium`.
+
+**Input:**
+
+<ParamField body="policy_number" type="string">
+  Final policy number to assign upon activation.
+</ParamField>
+
+<ParamField body="issue_date" type="string">
+  Official issue date in `YYYY-MM-DD` format.
+</ParamField>
+
+**Throws:** `AppError(400)` if the policy is not in `PENDIENTE_PAGO` or `EN_TRAMITE` status.
+
+---
+
+### `cancelPolicy(id, userContext)`
+
+Cancels a policy from **any state**, setting status to **CANCELADA**. Records cancellation metadata:
+- `reason`: `"Cancelada por usuario"`
+- `cancelledBy`: `userContext.id`
+- `cancelledAt`: current timestamp
+
+**Throws:** `AppError(404)` if the policy does not exist; `AppError(500)` if the update fails.
+
+---
+
+### `renewPolicy(id, userContext)`
+
+Creates a new policy as a renewal of the specified policy, then marks the original as **NO_RENOVADA**.
+
+The renewal policy is created with:
+- `start_date`: day after the original `end_date`
+- `end_date`: one year after the new `start_date`
+- `policy_number`: `<original_number>-R<current_year>` (e.g. `POL-2024-001-R2025`)
+- All premium amounts, `client_id`, `insurer_id`, and `payment_frequency` inherited from the original
+
+**Returns:** `Promise<Policy>` — the newly created renewal policy
+
+---
+
+## `getStats(filters, userContext)`
+
+Returns aggregated statistics about policies matching the given filters.
+
+**Input — `PolicyFilters`:**
+
+Same filter fields as `listPolicies` (see above).
+
+**Returns:** `Promise<PolicyStats>` — a breakdown of policy counts by status (e.g. total, `VIGENTE`, `COTIZADA`, `EN_TRAMITE`, `PENDIENTE_PAGO`, `CANCELADA`, `NO_RENOVADA`, `SUSPENDIDA`).
+
+---
+
+## TypeScript Usage Example
+
+```typescript
+// In a Server Component or Server Action
+import { policyService } from '@/lib/core/container';
+
+// Create a policy
+const policy = await policyService.createPolicy({
+  policy_number: 'POL-2025-001',
+  policy_type: 'Vehicular',
+  client_id: 'client-uuid',
+  insurer_id: 'insurer-uuid',
+  start_date: '2025-01-01',
+  end_date: '2026-01-01',
+  annual_premium: 900.00,
+  monthly_premium: 75.00,
+  payment_frequency: 'mensual',
+  policy_holder_name: 'María García',
+}, userContext);
+
+// Transition through the lifecycle
+await policyService.submitForApproval(policy.id, userContext);
+await policyService.approvePolicy(policy.id, userContext);
+await policyService.activatePolicy(policy.id, {
+  policy_number: 'POL-2025-001',
+  issue_date: '2025-01-15',
+}, userContext);
+// Payment schedule is now generated automatically
+```

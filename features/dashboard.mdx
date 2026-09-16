@@ -1,0 +1,174 @@
+---
+title: "Dashboard KPIs and Portfolio Metrics"
+sidebarTitle: "Dashboard"
+description: "The OASIS Seguros dashboard provides real-time insurance portfolio metrics including active policies, overdue payments, monthly revenue, and collection priorities."
+---
+
+The OASIS Seguros dashboard (`/`) is the first screen authenticated users land on. It aggregates live data from the payment and policy repositories into a concise set of KPIs, a 30-day delinquency trend chart, and a prioritised collection list. All metrics are ABAC-scoped — admins see the full portfolio, while agents see only the subset of clients assigned to them.
+
+## Dashboard Metrics from `DashboardService.getMetrics()`
+
+The `getMetrics()` method combines `paymentRepository.getStatistics()` with an internal `getPortfolioSummary()` call and returns a single metrics object:
+
+```typescript
+const metrics = await dashboardService.getMetrics({}, userContext);
+```
+
+| Field | Source | Description |
+|---|---|---|
+| `pagosHoy` | `paymentStats.pagosHoy` | Total payment amount received today |
+| `ingresosMes` | `paymentStats.ingresosMes` | Cumulative payment revenue for the current calendar month |
+| `enMora` | `paymentStats.enMora` | Object with `count` and `totalAmount` of currently overdue payments |
+| `proximosVencer` | `paymentStats.proximosVencer` | Payments due in the next configured look-ahead window |
+| `morosidad` | `paymentStats.morosidad` | 30-day delinquency trend data (for chart rendering) |
+| `resumenCartera` | `portfolioSummary` | Portfolio summary (see below) |
+
+### Portfolio Summary (`resumenCartera`)
+
+The `resumenCartera` field is computed from all `VIGENTE` policies in scope:
+
+| Sub-field | Description |
+|---|---|
+| `totalPolizas` | Total number of active (`VIGENTE`) policies |
+| `polizasActivas` | Same as `totalPolizas` (active count) |
+| `totalPrimasAnuales` | Sum of `annualPremium` across all active policies (rounded to 2 decimal places) |
+
+## Stat Cards Displayed in the Dashboard UI
+
+The dashboard renders four primary KPI cards at the top of the page:
+
+<CardGroup cols={2}>
+  <Card title="Pólizas Activas" icon="file-contract">
+    Count of policies currently in `VIGENTE` state within the user's scope. Sourced from `resumenCartera.polizasActivas`.
+  </Card>
+  <Card title="Total Clientes" icon="users">
+    Aggregate client count from `ClienteService.getClientKPIs()`. Breaks down into `total`, `active`, `inactive`, `pending`, and `moroso`.
+  </Card>
+  <Card title="Pagos en Mora" icon="triangle-exclamation">
+    Number and total amount of overdue installments. Sourced from `enMora.count` and `enMora.totalAmount`.
+  </Card>
+  <Card title="Ingresos del Mes" icon="chart-line">
+    Running total of payments received in the current month. Sourced from `ingresosMes`.
+  </Card>
+</CardGroup>
+
+## Client KPIs from `ClienteService.getClientKPIs()`
+
+The dashboard also surfaces client lifecycle counts via:
+
+```typescript
+const kpis = await clienteService.getClientKPIs();
+// {
+//   total:    number,  // All non-deleted clients
+//   active:   number,  // status = 'activo'
+//   inactive: number,  // status = 'inactivo'
+//   pending:  number,  // status = 'pendiente'
+//   moroso:   number,  // status = 'moroso'
+// }
+```
+
+These feed the "Total Clientes" stat card and any client breakdown widgets.
+
+## Collection Priority List
+
+`getCollectionPriorityList()` returns overdue items sorted by urgency (most days overdue first), providing agents with an actionable work queue:
+
+```typescript
+const priorityList = await dashboardService.getCollectionPriorityList(
+  {},      // filters
+  10,      // limit (default 10)
+  userCtx
+);
+```
+
+Each item in the list exposes:
+
+| Field | Description |
+|---|---|
+| Client name | Full name or `razonSocial` of the insured party |
+| Policy number | The `policyNumber` of the linked policy |
+| Days overdue | Calendar days since the `dueDate` |
+| Amount due | Outstanding `amountDue` on the overdue installment |
+
+<Tip>
+  Use the collection priority list as the basis for outbound call campaigns. The list is already sorted by urgency, so agents can work top-to-bottom without manual triaging.
+</Tip>
+
+## ABAC Scoping
+
+All `DashboardService` methods internally call `applyScope()`:
+
+```typescript
+private applyScope(filters, userContext) {
+  const scoped = { ...filters };
+  if (userContext?.role === 'agente') {
+    scoped.assignedAgentId = userContext.id;
+  }
+  return scoped;
+}
+```
+
+| Role | Scope |
+|---|---|
+| `admin` (or any non-agent role) | Full portfolio — no additional filters |
+| `agente` | Filtered to `policy.client.assignedAgentId = userContext.id` |
+
+## TypeScript Example: Fetching Dashboard Metrics
+
+```typescript
+import { dashboardService, clienteService } from '@/lib/core/container';
+import type { UserContext } from '@/lib/shared/types/UserContext';
+
+const userCtx: UserContext = { id: 'user-uuid', role: 'admin' };
+
+// Fetch primary dashboard metrics
+const metrics = await dashboardService.getMetrics({}, userCtx);
+
+console.log('Pagos hoy:',      metrics.pagosHoy);
+console.log('Ingresos mes:',   metrics.ingresosMes);
+console.log('En mora:',        metrics.enMora.count, 'pagos —', metrics.enMora.totalAmount, 'USD');
+console.log('Próximos vencer:', metrics.proximosVencer);
+console.log('Pólizas activas:', metrics.resumenCartera.polizasActivas);
+console.log('Primas anuales:',  metrics.resumenCartera.totalPrimasAnuales, 'USD');
+
+// Fetch client KPIs for the client stat card
+const kpis = await clienteService.getClientKPIs();
+console.log(`Clientes: ${kpis.total} total / ${kpis.active} activos / ${kpis.moroso} morosos`);
+
+// Fetch collection priority list
+const priority = await dashboardService.getCollectionPriorityList({}, 10, userCtx);
+priority.forEach((item, i) => {
+  console.log(`#${i + 1}: ${item.clientName} — ${item.policyNumber} — ${item.daysOverdue} días`);
+});
+```
+
+## Delinquency Trend
+
+`getMorosidadTrend()` returns the last 30 days of overdue payment data suitable for a time-series chart:
+
+```typescript
+const trend = await dashboardService.getMorosidadTrend({}, userCtx);
+// Array of { date: string, count: number, totalAmount: number }
+```
+
+This powers the delinquency trend chart on the dashboard, helping managers track whether the overdue portfolio is growing or shrinking over time.
+
+## Upcoming Payments Widget
+
+`getUpcomingPayments()` returns installments due within a configurable look-ahead window (default 7 days):
+
+```typescript
+const upcoming = await dashboardService.getUpcomingPayments(
+  7,       // days ahead
+  {},      // additional filters
+  userCtx
+);
+```
+
+This feeds the "Próximos a Vencer" section of the dashboard, enabling proactive collection before payments become overdue.
+
+## Dashboard UI Page
+
+<Card title="/ (Dashboard)" icon="gauge-high" href="/">
+  The root protected route renders KPI stat cards, the delinquency trend chart, the collection priority list, and the upcoming payments widget. Access is gated by Better-Auth — unauthenticated users are redirected to `/login`.
+</Card>

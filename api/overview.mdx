@@ -1,0 +1,108 @@
+---
+title: "OASIS Seguros API Overview and Integration Guide"
+sidebarTitle: "Overview"
+description: "OASIS Seguros exposes a REST API at /api and Next.js Server Actions. This page explains authentication, response format, and available endpoints."
+---
+
+OASIS Seguros offers two integration surfaces: a set of REST API routes mounted under `/api` for external HTTP access, and Next.js Server Actions for tightly coupled server-side operations invoked directly from React components. REST routes handle authentication and client lookups; the vast majority of business operations — creating policies, recording payments, managing clients — are implemented as Server Actions that run securely on the server with full access to session context.
+
+## Base URL
+
+| Environment | Base URL |
+|---|---|
+| Development | `http://localhost:3000` |
+| Production | Your production domain (e.g. `https://app.oasisseguros.com`) |
+
+## Authentication
+
+OASIS Seguros uses session-based authentication powered by [Better-Auth](https://www.better-auth.com). After a successful sign-in via `POST /api/auth/sign-in/email`, Better-Auth sets a `better-auth.session` cookie automatically. All subsequent requests — both REST calls and Server Actions — use this cookie to identify and authorize the user.
+
+<Note>
+  Server Actions read the session from request headers automatically via `auth.api.getSession()`. You do not need to pass any Authorization header when using Server Actions from within the Next.js application.
+</Note>
+
+To authenticate from an external HTTP client, first call the sign-in endpoint and persist the returned `Set-Cookie` header:
+
+```bash
+curl -X POST http://localhost:3000/api/auth/sign-in/email \
+  -H 'Content-Type: application/json' \
+  -d '{ "email": "agent@oasisseguros.com", "password": "your-password" }'
+```
+
+Then include the session cookie on subsequent requests:
+
+```bash
+curl http://localhost:3000/api/clientes/550e8400-e29b-41d4-a716-446655440000 \
+  -H 'Cookie: better-auth.session=<session-token>'
+```
+
+## Standard Response Format
+
+All REST endpoints return a consistent JSON envelope:
+
+```typescript
+// Success
+{ success: true, data: <payload> }
+
+// Error
+{ success: false, error: "<error message>" }
+```
+
+Server Actions extend this with optional field-level validation errors:
+
+```typescript
+// Validation error from a Server Action
+{
+  success: false,
+  error: "Error de validación",
+  fieldErrors: {
+    "email": ["El email no tiene un formato válido"],
+    "cedula": ["La cédula no es válida"]
+  }
+}
+```
+
+## Available REST Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/auth/[...all]` | Better-Auth handler — sign-in, sign-out, session retrieval |
+| `GET` | `/api/clientes/[id]` | Fetch a client's profile and associated policies |
+
+## HTTP Error Codes
+
+| Code | Meaning |
+|---|---|
+| `400` | Bad request — missing or invalid parameters |
+| `401` | Unauthenticated — no valid session cookie |
+| `403` | Forbidden — ABAC policy denies access (e.g. agent accessing another agent's client) |
+| `404` | Not found — resource does not exist |
+| `409` | Conflict — duplicate unique field (e.g. cédula or email already registered) |
+| `500` | Internal server error |
+
+## Server Actions
+
+Next.js Server Actions are asynchronous functions marked with the `'use server'` directive. They execute entirely on the server and are invoked by client components via a secure RPC-like mechanism built into Next.js. OASIS Seguros uses Server Actions for all mutating and complex query operations: creating clients and policies, recording payments, transitioning policy states, and searching.
+
+<Warning>
+  Server Actions are Next.js-native and cannot be called from external HTTP clients or third-party services. They are only callable from within the OASIS Seguros Next.js application. If you need external access to business operations, use the REST endpoints or build a dedicated API route.
+</Warning>
+
+All Server Actions in OASIS Seguros are built with the `createServerAction` factory, which automatically handles session verification, Zod input validation, `UserContext` injection, error mapping, and cache revalidation.
+
+## Explore the API
+
+<CardGroup cols={2}>
+  <Card title="Clients API" icon="users" href="/api/clients">
+    REST endpoint for fetching client profiles and their associated policies.
+  </Card>
+  <Card title="Policies API" icon="file-contract" href="/api/policies">
+    PolicyService methods for creating, listing, updating, and transitioning policy states.
+  </Card>
+  <Card title="Payments API" icon="credit-card" href="/api/payments">
+    PaymentService methods for recording payments, generating schedules, and processing overdue installments.
+  </Card>
+  <Card title="Server Actions" icon="bolt" href="/api/server-actions">
+    Complete reference for all Next.js Server Actions covering policies, payments, clients, and search.
+  </Card>
+</CardGroup>

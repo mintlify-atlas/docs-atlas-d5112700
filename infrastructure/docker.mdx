@@ -1,0 +1,218 @@
+---
+title: "Deploy OASIS Seguros with Docker Compose"
+sidebarTitle: "Docker"
+description: "Step-by-step guide to deploying OASIS Seguros with Docker Compose for development and production, including all four services and volume configuration."
+---
+
+OASIS Seguros ships with two Docker Compose configurations: `docker-compose.yml` for local development with hot-reload and live volume mounts, and `docker-compose.prod.yml` for production with a multi-stage optimized build, non-root containers, resource limits, and internal-only database networking. Both stacks run the same four services — PostgreSQL 15, Redis, the Next.js web app, and the background worker — wired together on a dedicated bridge network.
+
+## Services Overview
+
+Every service is connected to the `oasis-network` bridge and has a health check so dependent containers only start once their dependencies are truly ready.
+
+| Service | Container | Image | Exposed Port |
+|---|---|---|---|
+| `db` | `oasis_db` | `postgres:15-alpine` | `5432` |
+| `redis` | `oasis_redis` | `redis:alpine` | `6379` |
+| `web` | `oasis_web` | Custom (`Dockerfile`) | `3000` |
+| `worker` | `oasis_worker` | Custom (`Dockerfile`) | — |
+
+## Development Setup
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/JohannCaizaguano/OasisSeguros.git
+    cd OasisSeguros
+    ```
+  </Step>
+  <Step title="Configure environment variables">
+    Copy the example env file and fill in the required values. At minimum you need `BETTER_AUTH_SECRET` (32+ characters).
+
+    ```bash
+    cp app/.env.example app/.env
+    # Open app/.env and edit as needed
+    ```
+  </Step>
+  <Step title="Start all services">
+    ```bash
+    docker-compose up -d
+    ```
+
+    The `web` container runs `docker-entrypoint.sh` on first boot, which automatically generates the Prisma client, applies migrations, and seeds the database if it is empty — so you typically do not need to run those steps manually.
+  </Step>
+  <Step title="Run database migrations (if needed)">
+    If you need to apply migrations manually (e.g. after a schema change):
+
+    ```bash
+    docker-compose exec web npm run db:migrate
+    ```
+  </Step>
+  <Step title="Seed the database (if needed)">
+    ```bash
+    docker-compose exec web npm run db:seed
+    ```
+  </Step>
+  <Step title="Open the app">
+    Visit [http://localhost:3000](http://localhost:3000). The dev server starts with hot-reload enabled.
+  </Step>
+</Steps>
+
+## Volume Mounts
+
+The development stack mounts source code directly into the containers so changes are reflected immediately without a rebuild.
+
+| Volume | Purpose |
+|---|---|
+| `oasis_pgdata` | Persists PostgreSQL 15 data across restarts |
+| `oasis_redis_data` | Persists Redis append-only log |
+| `./app` → `/app` | Live source code for `web` and `worker` |
+| `./prisma` → `/prisma` | Prisma schema shared between both containers |
+| `/app/node_modules` (anonymous) | Keeps container `node_modules` isolated from the host |
+
+## Health Checks
+
+All four services have health checks defined. Docker will wait for a service to become healthy before starting any container that `depends_on` it.
+
+| Service | Health Check Command | Interval | Retries |
+|---|---|---|---|
+| `db` | `pg_isready -U oasis_user -d oasis_db` | 10s | 5 |
+| `redis` | `redis-cli ping` | 10s | 5 |
+| `web` | `curl -f http://localhost:3000` | 30s | 3 |
+| `worker` | _(inherits readiness from `db` and `redis`)_ | — | — |
+
+## Useful Commands
+
+<CodeGroup>
+```bash Logs
+# Stream web container logs
+docker-compose logs -f web
+
+# Stream worker container logs
+docker-compose logs -f worker
+```
+
+```bash Database
+# Run migrations manually
+docker-compose exec web npm run db:migrate
+
+# Seed with standard test data
+docker-compose exec web npm run db:seed
+
+# Seed with 2,500 heavy test clients
+docker-compose exec web npm run db:seed:heavy
+```
+
+```bash Lifecycle
+# Stop all services (data preserved)
+docker-compose down
+
+# Stop and delete all volumes (full DB reset)
+docker-compose down -v
+
+# Rebuild a specific service image
+docker-compose build web
+```
+</CodeGroup>
+
+<Tip>
+  Use `docker-compose down -v` to completely reset the database during development. This deletes the `oasis_pgdata` and `oasis_redis_data` volumes so the next `docker-compose up -d` starts from a clean slate and auto-seeds fresh data.
+</Tip>
+
+## Production Deployment
+
+The production stack (`docker-compose.prod.yml`) uses `Dockerfile.prod`, a three-stage build that produces a minimal, secure image:
+
+| Stage | Base Image | Purpose |
+|---|---|---|
+| `deps` | `node:20-alpine` | Install production and dev dependencies separately |
+| `builder` | `node:20-alpine` | Generate Prisma client, run `next build` |
+| `runner` | `node:20-alpine` | Copy only the compiled output — runs as non-root `nextjs` user |
+
+Key differences from development:
+
+| Aspect | Development | Production |
+|---|---|---|
+| Dockerfile | `Dockerfile` | `Dockerfile.prod` |
+| Hot-reload | ✅ Yes | ❌ No |
+| Source maps | ✅ Included | ❌ Excluded |
+| Container user | `root` | `nextjs` (non-root) |
+| DB/Redis ports exposed to host | ✅ Yes | ❌ Internal network only |
+| Memory limits | None | `web` 1 GB, `worker` 512 MB |
+| Log driver | stdout | JSON rotating (`10 MB × 5 files`) |
+
+<Steps>
+  <Step title="Prepare production environment file">
+    ```bash
+    cp .env.production.example .env.production
+    # Edit .env.production with real secrets
+    ```
+  </Step>
+  <Step title="Copy the Prisma schema into the build context">
+    The multi-stage build requires `prisma/schema.prisma` inside `app/prisma/` before building:
+
+    ```bash
+    cp prisma/schema.prisma app/prisma/schema.prisma
+    ```
+  </Step>
+  <Step title="Deploy">
+    ```bash
+    docker-compose -f docker-compose.prod.yml up -d
+    ```
+  </Step>
+  <Step title="Stream production logs">
+    ```bash
+    docker-compose -f docker-compose.prod.yml logs -f
+    ```
+  </Step>
+</Steps>
+
+### Production Security Notes
+
+<CardGroup cols={2}>
+  <Card title="Non-root containers" icon="shield-halved">
+    The `runner` stage creates a dedicated `nextjs` system user (UID 1001). Both `web` and `worker` run as this user in production.
+  </Card>
+  <Card title="Internal-only database" icon="lock">
+    In `docker-compose.prod.yml`, the `db` and `redis` port mappings are commented out. Databases are reachable only on `oasis-network-prod`.
+  </Card>
+  <Card title="Resource limits" icon="gauge-high">
+    Production services have explicit `deploy.resources` limits: 1 GB / 1 CPU for `web`, 512 MB / 0.5 CPU for `worker`, and 1 GB for `db`.
+  </Card>
+  <Card title="Redis persistence" icon="database">
+    Production Redis is started with `--appendonly yes` for durability and `--maxmemory 256mb --maxmemory-policy allkeys-lru` to cap memory usage.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Never use development secrets in production. `BETTER_AUTH_SECRET` must be a unique, randomly generated string of at least 32 characters. The `docker-compose.yml` default (`dev-secret-key-minimum-32-characters`) is for local use only and must not be deployed to any public-facing environment.
+</Warning>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Error: Schema not found">
+    The production build requires `prisma/schema.prisma` inside the `app/prisma/` directory. Copy the schema file before running the production build.
+  </Accordion>
+  <Accordion title="Port already in use">
+    Change the host-side port mapping in `docker-compose.yml`:
+    ```yaml
+    ports:
+      - "3001:3000"  # Map host 3001 → container 3000
+    ```
+  </Accordion>
+  <Accordion title="Container restarting constantly">
+    Check the last 100 log lines to diagnose startup errors:
+    ```bash
+    docker-compose logs --tail=100 web
+    ```
+  </Accordion>
+  <Accordion title="Clean slate reset">
+    Remove all containers, volumes, and cached images, then rebuild from scratch:
+    ```bash
+    docker-compose down -v
+    docker system prune -a
+    docker-compose up --build
+    ```
+  </Accordion>
+</AccordionGroup>

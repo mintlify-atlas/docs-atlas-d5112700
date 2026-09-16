@@ -1,0 +1,177 @@
+---
+title: "REST API: Client Endpoints in OASIS Seguros"
+sidebarTitle: "Clients API"
+description: "GET /api/clientes/[id] — Fetch a client's profile and associated policies. Requires an active session. Returns client details with policies array."
+---
+
+The Clients REST API exposes a single `GET` endpoint that returns a client's full profile alongside their associated insurance policies. It is primarily consumed by the OASIS Seguros frontend to populate client detail views, but can also be called from any HTTP client that holds a valid session cookie. For write operations (creating, updating, or deactivating clients), use the corresponding [Server Actions](/api/server-actions).
+
+---
+
+## GET /api/clientes/[id]
+
+Retrieves the profile of a specific client by their UUID, together with all policies linked to that client. The policies array is fetched via `PolicyService.listPolicies` with a `clientId` filter and a page size of 100.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The UUID of the client to retrieve. Example: `550e8400-e29b-41d4-a716-446655440000`.
+</ParamField>
+
+### Authentication
+
+Requires an active session. Include the `better-auth.session` cookie set during sign-in. See the [API Overview](/api/overview) for instructions on obtaining a session token.
+
+### Response — 200 OK
+
+```typescript
+{
+  success: true,
+  data: {
+    id: string;
+    nombreCompleto: string;          // Full display name (built from nombre + apellido or razonSocial)
+    nombre: string | null;           // First name (persona natural) or null
+    apellido: string | null;         // Last name (persona natural) or null
+    tipoCliente: 'natural' | 'juridica';
+    cedula: string | null;           // Ecuadorian national ID (persona natural)
+    ruc: string | null;              // Ecuadorian RUC tax ID (persona jurídica)
+    identificacion: string;          // cedula for natural, ruc for juridica
+    email: string | null;
+    telefono: string | null;
+    direccion: string | null;
+    activo: boolean;                 // true when status is 'activo', 'moroso', or 'pendiente'
+    createdAt: string | null;        // ISO 8601 timestamp
+    policies: Array<{
+      id: string;
+      policyNumber: string;
+      policyType: string | null;
+      productName: string | null;
+      status: string | null;         // COTIZADA | EN_TRAMITE | PENDIENTE_PAGO | VIGENTE | CANCELADA | NO_RENOVADA | SUSPENDIDA
+      startDate: string;             // ISO 8601 timestamp
+      endDate: string;               // ISO 8601 timestamp
+      annualPremium: number | null;
+    }>;
+  }
+}
+```
+
+### Response Fields
+
+<ResponseField name="id" type="string">
+  UUID of the client.
+</ResponseField>
+
+<ResponseField name="nombreCompleto" type="string">
+  Computed full display name. For `natural` clients, this is `"nombre apellido"`. For `juridica` clients, this is the `razonSocial`.
+</ResponseField>
+
+<ResponseField name="nombre" type="string | null">
+  Given name. Populated for `natural` clients only.
+</ResponseField>
+
+<ResponseField name="apellido" type="string | null">
+  Family name. Populated for `natural` clients only.
+</ResponseField>
+
+<ResponseField name="tipoCliente" type="'natural' | 'juridica'">
+  Whether this client is a natural person or a legal entity.
+</ResponseField>
+
+<ResponseField name="cedula" type="string | null">
+  Ecuadorian 10-digit national ID. Present for `natural` clients.
+</ResponseField>
+
+<ResponseField name="ruc" type="string | null">
+  Ecuadorian 13-digit RUC tax identifier. Present for `juridica` clients.
+</ResponseField>
+
+<ResponseField name="identificacion" type="string">
+  Convenience field: `cedula` for natural persons, `ruc` for legal entities.
+</ResponseField>
+
+<ResponseField name="email" type="string | null">
+  Client email address.
+</ResponseField>
+
+<ResponseField name="telefono" type="string | null">
+  Client phone number in Ecuadorian format (`09xxxxxxxx`).
+</ResponseField>
+
+<ResponseField name="direccion" type="string | null">
+  Client physical address.
+</ResponseField>
+
+<ResponseField name="activo" type="boolean">
+  `true` when the client's `status` is `activo`, `moroso`, or `pendiente`. `false` when `inactivo` or `eliminado`.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string | null">
+  ISO 8601 timestamp of when the client record was created.
+</ResponseField>
+
+<ResponseField name="policies" type="array">
+  Up to 100 policies associated with this client, ordered by the repository default. Each item includes `id`, `policyNumber`, `policyType`, `productName`, `status`, `startDate`, `endDate`, and `annualPremium`.
+</ResponseField>
+
+### Error Responses
+
+| Status | Body |
+|---|---|
+| `400` | `{ "success": false, "error": "ID de cliente requerido" }` |
+| `404` | `{ "success": false, "error": "Cliente no encontrado" }` |
+| `500` | `{ "success": false, "error": "Error interno del servidor" }` |
+
+### cURL Example
+
+```bash
+curl -X GET http://localhost:3000/api/clientes/550e8400-e29b-41d4-a716-446655440000 \
+  -H 'Cookie: better-auth.session=<your-session-token>'
+```
+
+### Example Response
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "nombreCompleto": "Juan Pérez",
+    "nombre": "Juan",
+    "apellido": "Pérez",
+    "tipoCliente": "natural",
+    "cedula": "1712345678",
+    "ruc": null,
+    "identificacion": "1712345678",
+    "email": "juan.perez@email.com",
+    "telefono": "0991234567",
+    "direccion": "Av. República 123, Quito",
+    "activo": true,
+    "createdAt": "2025-01-15T10:30:00.000Z",
+    "policies": [
+      {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "policyNumber": "POL-2025-001",
+        "policyType": "Vida",
+        "productName": "Seguro de Vida Plus",
+        "status": "VIGENTE",
+        "startDate": "2025-01-01T00:00:00.000Z",
+        "endDate": "2026-01-01T00:00:00.000Z",
+        "annualPremium": 1200.00
+      }
+    ]
+  }
+}
+```
+
+---
+
+## Implementation Notes
+
+The route handler at `src/app/api/clientes/[id]/route.ts` delegates to two services:
+
+1. **`clienteService.obtenerCliente(id)`** — fetches the client entity. Throws `"Cliente no encontrado"` if no match.
+2. **`policyService.listPolicies({ clientId: id }, { page: 1, limit: 100 }, undefined)`** — fetches associated policies. If this call fails (e.g. no policies exist), the error is caught and `policies` defaults to an empty array. The client data is still returned.
+
+<Note>
+  For internal UI operations, prefer using `ClienteService` methods directly via Server Actions or Server Components instead of calling this REST endpoint. The REST endpoint exists primarily for lightweight external integrations and debugging.
+</Note>
