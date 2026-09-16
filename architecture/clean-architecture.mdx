@@ -1,7 +1,7 @@
 ---
-title: "Clean Architecture and DDD in OASIS Seguros"
+title: "Clean Architecture Layers and DDD in OASIS Seguros"
 sidebarTitle: "Clean Architecture"
-description: "How OASIS Seguros implements Clean Architecture with Domain-Driven Design: domain entities, repositories, application services, and infrastructure adapters."
+description: "How OASIS Seguros structures code with Clean Architecture and DDD: domain entities, repositories, application services, and infrastructure adapters."
 ---
 
 OASIS Seguros structures its business logic using Clean Architecture combined with Domain-Driven Design (DDD). The goal is a strict separation between what the system *does* (business rules), how it *orchestrates* work (use-case services), and how it *talks to the outside world* (databases, email providers, queues). This page explains each layer, shows how they fit together through dependency injection, and traces a real request from a Next.js Server Action down to the database and back.
@@ -10,7 +10,7 @@ OASIS Seguros structures its business logic using Clean Architecture combined wi
 
 All business code lives under `app/src/lib/` and is divided into three concentric layers. Outer layers may depend on inner ones, but inner layers must never import from outer ones.
 
-```
+```text
 app/src/lib/
 ├── domain/          ← Layer 1: Pure business logic (no framework deps)
 │   ├── entities/
@@ -67,10 +67,10 @@ All singleton instances are wired together in `src/lib/core/container.ts`. There
 // src/lib/core/container.ts (abridged)
 
 // Infrastructure singletons
-const clienteRepository  = new ClienteRepository();
-const policyRepository   = new PolicyRepository();
-const paymentRepository  = new PaymentRepository();
-const insurerRepository  = new InsurerRepository();
+const clienteRepository       = new ClienteRepository();
+const policyRepository        = new PolicyRepository();
+const paymentRepository       = new PaymentRepository();
+const insurerRepository       = new InsurerRepository();
 const configurationRepository = new ConfigurationRepository();
 const notificationRepository  = new NotificationRepository();
 
@@ -88,6 +88,10 @@ export const policyService = new PolicyService(
   insurerRepository,
   paymentService        // cross-service dependency
 );
+
+export const insurerService = new InsurerService(insurerRepository);
+
+export const configurationService = new ConfigurationService(configurationRepository);
 
 export const dashboardService = new DashboardService(
   paymentRepository,

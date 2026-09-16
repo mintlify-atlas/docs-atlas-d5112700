@@ -22,7 +22,7 @@ OASIS Seguros is built for insurance-sector teams that have outgrown spreadsheet
 
 **Payment Schedule Generation** — Automatically generate monthly or custom payment schedules tied to each policy, track individual payment events, and flag overdue installments for follow-up.
 
-**Multi-Channel Notifications** — Deliver renewal reminders, payment confirmations, and overdue alerts via email (Resend or SMTP) and SMS (Twilio). Notification jobs run as background workers so the web layer stays responsive.
+**Multi-Channel Notifications** — Deliver renewal reminders, payment confirmations, and overdue alerts via email (Resend) and SMS (Twilio). Notification jobs run as background workers so the web layer stays responsive.
 
 **Audit Logging** — Every write operation — client updates, policy state changes, payment recordings — is appended to an immutable audit log. Entries capture the acting user, timestamp, before/after state, and IP address for full regulatory traceability.
 
@@ -30,14 +30,14 @@ OASIS Seguros is built for insurance-sector teams that have outgrown spreadsheet
 
 | Layer | Technology |
 |---|---|
-| **Web Framework** | Next.js 16 (App Router) |
+| **Web Framework** | Next.js 15/16 (App Router) |
 | **UI Library** | React 19 |
 | **Database** | PostgreSQL 15 |
 | **ORM** | Prisma ORM |
 | **Cache & Sessions** | Redis |
-| **Authentication** | Better-Auth (email + password, bcrypt, JWT sessions) |
+| **Authentication** | Better-Auth (email + password, bcrypt) |
 | **Background Workers** | pg-boss (PostgreSQL-backed job queue) |
-| **Email** | Resend / SMTP |
+| **Email** | Resend |
 | **SMS** | Twilio |
 | **UI Components** | Shadcn UI |
 | **Styling** | Tailwind CSS 4 |

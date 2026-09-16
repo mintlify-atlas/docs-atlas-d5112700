@@ -1,5 +1,5 @@
 ---
-title: "REST API: Client Endpoints in OASIS Seguros"
+title: "REST API: Client Profile Endpoints in OASIS Seguros"
 sidebarTitle: "Clients API"
 description: "GET /api/clientes/[id] — Fetch a client's profile and associated policies. Requires an active session. Returns client details with policies array."
 ---
@@ -114,6 +114,8 @@ Requires an active session. Include the `better-auth.session` cookie set during 
 </ResponseField>
 
 ### Error Responses
+
+The route handler returns the following error shapes exactly as written in the source:
 
 | Status | Body |
 |---|---|

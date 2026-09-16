@@ -121,7 +121,7 @@ Creates a new insurance policy. Validates that the referenced `client_id` and `i
 
 ### `renewPolicy(id, data)`
 
-Updates an existing policy — commonly used as part of a renewal workflow. Accepts any subset of `UpdatePolicySchema` fields. Revalidates `/dashboard/polizas` and `/polizas/[id]` on success.
+Applies a partial update to an existing policy. All fields from `UpdatePolicySchema` are optional. This action wraps `policyService.updatePolicy` and is commonly used during renewal workflows or general edits. Revalidates `/dashboard/polizas` and `/polizas/[id]` on success.
 
 **Parameters:**
 
@@ -153,13 +153,21 @@ All fields from `CreatePolicySchema` are accepted as optional updates, plus:
   Date of the most recent payment received.
 </ParamField>
 
+<ParamField body="updated_by" type="string">
+  UUID of the user performing the update (stored for audit purposes).
+</ParamField>
+
 **Returns:** `ActionResponse<PolicyResponse>`
 
 ---
 
-## Policy State Transition Actions
+## Policy State Transition Methods
 
-These actions are defined directly on the `PolicyService` and called from server components or dedicated action wrappers. Each enforces a strict state machine — passing an invalid `status` throws an `AppError` with HTTP 400.
+These methods are defined on `PolicyService` and called directly from Server Components or dedicated server-side wrappers. They are **not** exported Server Actions — they enforce a strict state machine and throw an `AppError` with HTTP 400 when an invalid source state is passed. Import the service from `@/lib/core/container`.
+
+```typescript
+import { policyService } from '@/lib/core/container';
+```
 
 ### `submitForApproval(id, userContext)`
 
@@ -169,9 +177,9 @@ Moves a policy from **COTIZADA → EN_TRAMITE**.
   UUID of the policy. Must be in `COTIZADA` status.
 </ParamField>
 
-**Returns:** `Policy`
+**Returns:** `Promise<Policy>`
 
-**Throws:** `AppError(400)` if policy is not in `COTIZADA` status.
+**Throws:** `AppError(400)` — `"Solo pólizas en estado COTIZADA pueden enviarse a aprobación"` if the current status is not `COTIZADA`.
 
 ---
 
@@ -183,9 +191,9 @@ Moves a policy from **EN_TRAMITE → PENDIENTE_PAGO**.
   UUID of the policy. Must be in `EN_TRAMITE` status.
 </ParamField>
 
-**Returns:** `Policy`
+**Returns:** `Promise<Policy>`
 
-**Throws:** `AppError(400)` if policy is not in `EN_TRAMITE` status.
+**Throws:** `AppError(400)` — `"Solo pólizas en estado EN_TRAMITE pueden ser aprobadas"` if the current status is not `EN_TRAMITE`.
 
 ---
 
@@ -207,9 +215,9 @@ Moves a policy from **PENDIENTE_PAGO or EN_TRAMITE → VIGENTE**. On activation:
   Official issue date in `YYYY-MM-DD` format.
 </ParamField>
 
-**Returns:** `Policy`
+**Returns:** `Promise<Policy>`
 
-**Throws:** `AppError(400)` if policy is not in a valid activation state.
+**Throws:** `AppError(400)` — `"La póliza no está en estado válido para activación (Pendiente Pago o En Trámite)"` if the policy is not in a valid activation state.
 
 ---
 
@@ -221,7 +229,9 @@ Cancels a policy from any state, setting it to **CANCELADA**. Records cancellati
   UUID of the policy to cancel.
 </ParamField>
 
-**Returns:** `Policy`
+**Returns:** `Promise<Policy>`
+
+**Throws:** `AppError(404)` if the policy does not exist; `AppError(500)` if the update fails.
 
 ---
 
@@ -239,7 +249,7 @@ The original policy is then marked **NO_RENOVADA**.
   UUID of the policy to renew.
 </ParamField>
 
-**Returns:** `Policy` (the newly created renewal policy)
+**Returns:** `Promise<Policy>` (the newly created renewal policy)
 
 ---
 
@@ -300,11 +310,11 @@ Creates a new client. Validates uniqueness of `cedula`, `ruc`, and `email`. The 
 </ParamField>
 
 <ParamField body="nombre" type="string">
-  First name. Required when `tipoCliente` is `natural`. Minimum 2 characters.
+  First name. Required when `tipoCliente` is `natural`. Minimum 2 characters, maximum 80.
 </ParamField>
 
 <ParamField body="apellido" type="string">
-  Last name. Required when `tipoCliente` is `natural`. Minimum 2 characters.
+  Last name. Required when `tipoCliente` is `natural`. Minimum 2 characters, maximum 80.
 </ParamField>
 
 <ParamField body="cedula" type="string">
@@ -312,7 +322,7 @@ Creates a new client. Validates uniqueness of `cedula`, `ruc`, and `email`. The 
 </ParamField>
 
 <ParamField body="razonSocial" type="string">
-  Company legal name. Required when `tipoCliente` is `juridica`. Minimum 2 characters.
+  Company legal name. Required when `tipoCliente` is `juridica`. Minimum 2 characters, maximum 150.
 </ParamField>
 
 <ParamField body="ruc" type="string">
@@ -320,7 +330,7 @@ Creates a new client. Validates uniqueness of `cedula`, `ruc`, and `email`. The 
 </ParamField>
 
 <ParamField body="email" type="string" required>
-  Client email address. Must be unique across all clients.
+  Client email address. Must be a valid email and unique across all clients.
 </ParamField>
 
 <ParamField body="telefono" type="string">
@@ -328,11 +338,11 @@ Creates a new client. Validates uniqueness of `cedula`, `ruc`, and `email`. The 
 </ParamField>
 
 <ParamField body="direccion" type="string">
-  Physical address. Minimum 8 characters.
+  Physical address. Minimum 8 characters, maximum 200.
 </ParamField>
 
 <ParamField body="assignedAgentId" type="string">
-  UUID of the agent assigned to manage this client. Optional.
+  UUID of the agent assigned to manage this client. Optional, nullable.
 </ParamField>
 
 **Returns:** `ActionResponse<ClienteResponse>`
@@ -354,7 +364,7 @@ Searches for clients by name, email, cédula, or RUC. Returns the first 10 match
 **Returns:** Serialized array of up to 10 `Cliente` objects.
 
 <Tip>
-  `searchClients` does not use the `createServerAction` factory — it is a plain `'use server'` function and does not enforce authentication. Use it in contexts where the surrounding page already guarantees a session (e.g. inside `/dashboard` routes protected by middleware).
+  `searchClients` does not use the `createServerAction` factory — it is a plain `'use server'` function and does not enforce authentication automatically. Use it in contexts where the surrounding page already guarantees a session (e.g. inside `/dashboard` routes protected by middleware).
 </Tip>
 
 ---

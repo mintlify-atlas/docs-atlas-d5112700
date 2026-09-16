@@ -31,11 +31,10 @@ The most commonly adjusted setting is the payment reminder configuration, which 
 
 ```typescript
 interface ReminderConfig {
-  daysBeforeDue: number;   // Days before due date to send the reminder
-  sendTime: string;        // Time of day in HH:MM format, e.g. "08:00"
-  emailEnabled: boolean;   // Enable the email notification channel
-  smsEnabled: boolean;     // Enable the SMS notification channel
-  isActive: boolean;       // Master switch for the reminder system
+  daysBeforeDue: number | undefined;  // Days before due date to send the reminder
+  sendTime: string | undefined;       // Time of day in HH:MM format, e.g. "08:00"
+  emailEnabled: boolean | undefined;  // Enable the email notification channel
+  smsEnabled: boolean | undefined;    // Enable the SMS notification channel
 }
 ```
 
@@ -63,7 +62,7 @@ async getReminderConfig(): Promise<ReminderConfig>
 
 ```typescript
 const config = await configurationService.getReminderConfig();
-// { daysBeforeDue: 7, sendTime: "08:00", emailEnabled: true, smsEnabled: false, isActive: true }
+// { daysBeforeDue: 7, sendTime: "08:00", emailEnabled: true, smsEnabled: false }
 ```
 
 ---
@@ -190,11 +189,14 @@ Every configuration write is appended to the `audit.audit_config` table. This ta
 
 | Column | Description |
 |---|---|
+| `config_section` | Logical grouping for the setting (e.g. `reminders`) |
 | `config_key` | The unique key of the changed setting |
-| `old_value` | The previous value (JSON-serialized) |
-| `new_value` | The new value (JSON-serialized) |
+| `old_value` | The previous value (JSON-serialized string) |
+| `new_value` | The new value (JSON-serialized string) |
 | `changed_by` | The `user.id` from `userContext` |
-| `changed_at` | UTC timestamp of the change |
+| `change_reason` | Optional free-text reason for the change |
+| `change_timestamp` | UTC timestamp of the change |
+| `is_sensitive` | `true` if the changed value is considered sensitive |
 
 The audit log cannot be modified through `ConfigurationService` — it is append-only and written as part of the same database transaction as the configuration update itself.
 

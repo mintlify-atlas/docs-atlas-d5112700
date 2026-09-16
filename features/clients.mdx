@@ -1,7 +1,7 @@
 ---
-title: "Managing Clients in OASIS Seguros"
+title: "OASIS Seguros Client Lifecycle and Portfolio Management"
 sidebarTitle: "Clients"
-description: "How OASIS Seguros handles client lifecycle management for natural persons and legal entities, including status tracking, KPIs, and search."
+description: "How OASIS Seguros manages client lifecycle for natural persons and legal entities, including status tracking, KPI aggregates, and ABAC scoping."
 ---
 
 OASIS Seguros models every insured party as a **Cliente** — a first-class domain entity that tracks identity, contact details, assigned agent, and a lifecycle status. Clients are created before any policy is issued and remain in the system permanently via soft-deletion. The service layer (`ClienteService`) enforces uniqueness of national identifiers and email addresses and exposes operations for full CRUD, filtered listing, and portfolio KPIs.
@@ -95,7 +95,7 @@ const newClientData: CreateClientDto = {
   apellido: 'Pérez',
   cedula: '1713456789',
   email: 'maria.perez@ejemplo.ec',
-  telefono: '+593987654321',
+  telefono: '0987654321',
   direccion: 'Av. Amazonas N21-147, Quito',
 };
 

@@ -1,7 +1,7 @@
 ---
-title: "Dashboard KPIs and Portfolio Metrics"
+title: "OASIS Seguros Dashboard: Portfolio KPIs and Metrics Guide"
 sidebarTitle: "Dashboard"
-description: "The OASIS Seguros dashboard provides real-time insurance portfolio metrics including active policies, overdue payments, monthly revenue, and collection priorities."
+description: "The OASIS Seguros dashboard surfaces real-time KPIs for active policies, overdue payments, monthly revenue, and collection priorities, scoped by role."
 ---
 
 The OASIS Seguros dashboard (`/`) is the first screen authenticated users land on. It aggregates live data from the payment and policy repositories into a concise set of KPIs, a 30-day delinquency trend chart, and a prioritised collection list. All metrics are ABAC-scoped — admins see the full portfolio, while agents see only the subset of clients assigned to them.
@@ -18,7 +18,7 @@ const metrics = await dashboardService.getMetrics({}, userContext);
 |---|---|---|
 | `pagosHoy` | `paymentStats.pagosHoy` | Total payment amount received today |
 | `ingresosMes` | `paymentStats.ingresosMes` | Cumulative payment revenue for the current calendar month |
-| `enMora` | `paymentStats.enMora` | Object with `count` and `totalAmount` of currently overdue payments |
+| `enMora` | `paymentStats.enMora` | Overdue payment aggregate returned by `paymentRepository.getStatistics()` |
 | `proximosVencer` | `paymentStats.proximosVencer` | Payments due in the next configured look-ahead window |
 | `morosidad` | `paymentStats.morosidad` | 30-day delinquency trend data (for chart rendering) |
 | `resumenCartera` | `portfolioSummary` | Portfolio summary (see below) |
@@ -45,7 +45,7 @@ The dashboard renders four primary KPI cards at the top of the page:
     Aggregate client count from `ClienteService.getClientKPIs()`. Breaks down into `total`, `active`, `inactive`, `pending`, and `moroso`.
   </Card>
   <Card title="Pagos en Mora" icon="triangle-exclamation">
-    Number and total amount of overdue installments. Sourced from `enMora.count` and `enMora.totalAmount`.
+    Overdue installments aggregate. Sourced from `enMora` in `getMetrics()`.
   </Card>
   <Card title="Ingresos del Mes" icon="chart-line">
     Running total of payments received in the current month. Sourced from `ingresosMes`.
@@ -124,9 +124,9 @@ const userCtx: UserContext = { id: 'user-uuid', role: 'admin' };
 // Fetch primary dashboard metrics
 const metrics = await dashboardService.getMetrics({}, userCtx);
 
-console.log('Pagos hoy:',      metrics.pagosHoy);
-console.log('Ingresos mes:',   metrics.ingresosMes);
-console.log('En mora:',        metrics.enMora.count, 'pagos —', metrics.enMora.totalAmount, 'USD');
+console.log('Pagos hoy:',       metrics.pagosHoy);
+console.log('Ingresos mes:',    metrics.ingresosMes);
+console.log('En mora:',         metrics.enMora);
 console.log('Próximos vencer:', metrics.proximosVencer);
 console.log('Pólizas activas:', metrics.resumenCartera.polizasActivas);
 console.log('Primas anuales:',  metrics.resumenCartera.totalPrimasAnuales, 'USD');

@@ -82,6 +82,14 @@ These four variables must be present for the application to start. Missing any o
   ```
 </ParamField>
 
+<ParamField body="NEXT_PUBLIC_API_URL" type="string">
+  Public base URL for client-side API calls. Defaults to the same origin as `NEXT_PUBLIC_APP_URL` in a standard deployment.
+
+  ```
+  NEXT_PUBLIC_API_URL=http://localhost:3000
+  ```
+</ParamField>
+
 <ParamField body="DIRECT_URL" type="string">
   A direct (non-pooled) PostgreSQL connection string used by Prisma Migrate when applying schema migrations. In most deployments this is the same value as `DATABASE_URL`. It becomes important when `DATABASE_URL` points to a connection pooler (e.g. PgBouncer) that does not support DDL statements.
 
@@ -90,42 +98,70 @@ These four variables must be present for the application to start. Missing any o
   ```
 </ParamField>
 
+<ParamField body="INTERNAL_API_URL" type="string">
+  Internal server-to-server base URL used by background workers and server-side code to call API routes without going through the public network. Optional in single-host deployments where the worker and web process share the same host.
+
+  ```
+  INTERNAL_API_URL=http://localhost:3000
+  ```
+</ParamField>
+
+<ParamField body="FRONTEND_LOGIN_URL" type="string">
+  Full URL to the login page, embedded in outgoing email notifications (e.g. the "Log In" call-to-action button in password and credential emails). Defaults to `http://localhost:3000/login` if not set.
+
+  ```
+  FRONTEND_LOGIN_URL=https://yourdomain.com/login
+  ```
+</ParamField>
+
 ---
 
 ## Email (Optional)
 
-At least one email transport must be configured to enable notification delivery. OASIS Seguros supports both Resend (API key) and a standard SMTP server. If neither is configured, email notifications are silently skipped and logged.
+Resend is the primary email transport. Configure `RESEND_API_KEY` to enable email delivery. If it is not set, email notifications are silently skipped and logged. The SMTP variables defined in `env.ts` are reserved for future SMTP transport support.
 
 <ParamField body="RESEND_API_KEY" type="string">
-  API key for the [Resend](https://resend.com) email delivery service. When set, Resend is used as the primary email transport.
+  API key for the [Resend](https://resend.com) email delivery service. When set, Resend is used as the email transport for all outgoing notifications.
 
   ```
   RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
   ```
 </ParamField>
 
+<ParamField body="EMAIL_FROM" type="string">
+  The sender address that appears in the `From:` header of all outgoing emails. Defaults to `Oasis Seguros <no-reply@oasisseguros.com>` if not set.
+
+  ```
+  EMAIL_FROM=noreply@yourdomain.com
+  ```
+</ParamField>
+
+<ParamField body="EMAIL_DRY_RUN" type="string">
+  Set to `true` to enable dry-run mode for email delivery. Emails are logged and rendered but **not** sent to recipients. Useful for development and testing. Accepted values: `true` or `false` (default: `false`).
+
+  ```
+  EMAIL_DRY_RUN=true
+  ```
+</ParamField>
+
 <ParamField body="SMTP_HOST" type="string">
-  Hostname of the SMTP mail server (e.g. `smtp.gmail.com`, `smtp.mailgun.org`). Required when using SMTP transport instead of Resend.
+  Hostname of the SMTP mail server (e.g. `smtp.gmail.com`, `smtp.mailgun.org`). Reserved for SMTP transport.
 </ParamField>
 
 <ParamField body="SMTP_PORT" type="number">
-  SMTP port number. Typical values are `587` (STARTTLS) or `465` (SSL/TLS).
+  SMTP port number. Typical values are `587` (STARTTLS) or `465` (SSL/TLS). Defaults to `587`.
+</ParamField>
+
+<ParamField body="SMTP_SECURE" type="string">
+  Set to `true` to use SSL/TLS for the SMTP connection, or `false` for STARTTLS. Defaults to `false`. Accepted values: `true` or `false`.
 </ParamField>
 
 <ParamField body="SMTP_USER" type="string">
   SMTP authentication username, usually an email address.
 </ParamField>
 
-<ParamField body="SMTP_PASS" type="string">
+<ParamField body="SMTP_PASSWORD" type="string">
   SMTP authentication password or app-specific password.
-</ParamField>
-
-<ParamField body="EMAIL_FROM" type="string">
-  The sender address that appears in the `From:` header of all outgoing emails.
-
-  ```
-  EMAIL_FROM=noreply@yourdomain.com
-  ```
 </ParamField>
 
 ---
@@ -151,6 +187,48 @@ All three Twilio variables must be present together to enable SMS notifications.
 
   ```
   TWILIO_PHONE_NUMBER=+1234567890
+  ```
+</ParamField>
+
+<ParamField body="SMS_DRY_RUN" type="string">
+  Set to `true` to enable dry-run mode for SMS delivery. Messages are logged but **not** sent to recipients. Accepted values: `true` or `false` (default: `false`).
+
+  ```
+  SMS_DRY_RUN=true
+  ```
+</ParamField>
+
+---
+
+## Company Contact
+
+These optional variables are embedded in outgoing email templates.
+
+<ParamField body="COMPANY_PHONE" type="string">
+  Company phone number displayed in the footer of all outgoing email notifications. Defaults to a placeholder value if not set.
+
+  ```
+  COMPANY_PHONE=+1 800 555 0100
+  ```
+</ParamField>
+
+<ParamField body="COMPANY_SUPPORT_EMAIL" type="string">
+  Support email address displayed in the footer of all outgoing email notifications.
+
+  ```
+  COMPANY_SUPPORT_EMAIL=support@yourdomain.com
+  ```
+</ParamField>
+
+---
+
+## Build & Validation
+
+<ParamField body="SKIP_ENV_VALIDATION" type="string">
+  Set to any truthy value (e.g. `1`) to skip runtime environment variable validation performed by `@t3-oss/env-nextjs`. Useful in CI pipelines where env vars are not available at build time.
+
+  ```
+  SKIP_ENV_VALIDATION=1
   ```
 </ParamField>
 
@@ -181,24 +259,37 @@ BETTER_AUTH_SECRET=your-cryptographically-random-secret-minimum-32-characters
 # ── Application URLs ──────────────────────────────────────────────────────────
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:3000
+FRONTEND_LOGIN_URL=http://localhost:3000/login
+INTERNAL_API_URL=http://localhost:3000
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 NODE_ENV=development
 
-# ── Email — Resend (optional) ─────────────────────────────────────────────────
+# ── Email — Resend (primary transport) ───────────────────────────────────────
 RESEND_API_KEY=
+EMAIL_FROM=noreply@yourdomain.com
+EMAIL_DRY_RUN=false
 
-# ── Email — SMTP (optional, alternative to Resend) ───────────────────────────
+# ── Email — SMTP (reserved for future SMTP transport) ────────────────────────
 SMTP_HOST=
 SMTP_PORT=587
+SMTP_SECURE=false
 SMTP_USER=
-SMTP_PASS=
-EMAIL_FROM=noreply@yourdomain.com
+SMTP_PASSWORD=
 
 # ── SMS — Twilio (optional) ───────────────────────────────────────────────────
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
+SMS_DRY_RUN=false
+
+# ── Company Contact (used in email templates) ────────────────────────────────
+COMPANY_PHONE=
+COMPANY_SUPPORT_EMAIL=
+
+# ── Build & CI ────────────────────────────────────────────────────────────────
+# SKIP_ENV_VALIDATION=1
 ```
 
 <Tip>

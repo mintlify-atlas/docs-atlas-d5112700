@@ -125,9 +125,9 @@ The production stack (`docker-compose.prod.yml`) uses `Dockerfile.prod`, a three
 
 | Stage | Base Image | Purpose |
 |---|---|---|
-| `deps` | `node:20-alpine` | Install production and dev dependencies separately |
+| `deps` | `node:20-alpine` | Install production deps (saved aside), then full deps for the build |
 | `builder` | `node:20-alpine` | Generate Prisma client, run `next build` |
-| `runner` | `node:20-alpine` | Copy only the compiled output — runs as non-root `nextjs` user |
+| `runner` | `node:20-alpine` | Copy only the compiled output — runs as non-root `nextjs` user (UID 1001) |
 
 Key differences from development:
 

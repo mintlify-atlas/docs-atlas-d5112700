@@ -1,7 +1,7 @@
 ---
-title: "OASIS Seguros Database Schema and Prisma Models"
+title: "OASIS Seguros PostgreSQL Schemas and Prisma Models"
 sidebarTitle: "Database Schema"
-description: "Multi-schema PostgreSQL database design for OASIS Seguros: schemas, core models, relationships, enums, and migration workflow."
+description: "Multi-schema PostgreSQL database design for OASIS Seguros: eight schemas, core Prisma models, relationships, enums, and migration workflow."
 ---
 
 OASIS Seguros uses a single PostgreSQL 15 instance partitioned into eight logical schemas. Rather than prefixing every table (e.g., `auth_user`, `clients_client`) or spinning up separate databases per domain, PostgreSQL schemas give each business subdomain its own namespace with clear ownership boundaries while keeping all foreign-key relationships within one engine and one Prisma data source. Prisma's `multiSchema` preview feature is enabled to support this layout.
@@ -46,6 +46,7 @@ model Client {
   email             String?
   status            ClientStatus @default(pendiente)
   dateOfBirth       DateTime?    @db.Date
+  gender            String?
   profession        String?
   annualIncome      Decimal?     @db.Decimal(15, 2)
   riskProfile       String?
@@ -88,6 +89,7 @@ model Policy {
   insurerId                String        @db.Uuid              // FK → insurance.insurer
   policyType               String        @map("policy_type")
   productName              String?
+  description              String?
   status                   PolicyStatus  @default(COTIZADA)
   issueDate                DateTime      @db.Date
   startDate                DateTime      @db.Date
@@ -221,7 +223,7 @@ All enums are scoped to their owning schema.
 | Value | Meaning |
 |---|---|
 | `pendiente` | Scheduled but not yet due or paid |
-| `verificando` | Payment received, being verified |
+| `verificando` | Payment submitted and being verified |
 | `pagado` | Fully paid |
 | `vencido` | Past due date without payment |
 | `parcial` | Partially paid |
@@ -278,7 +280,7 @@ All enums are scoped to their owning schema.
 
 ## Key Relationships
 
-```
+```text
 auth.user
   ├──< clients.client (assignedAgentId)   — agent owns clients
   └──< auth.user_role                     — RBAC assignments

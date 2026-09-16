@@ -69,13 +69,18 @@ Three job types are registered at startup, each backed by a named constant from 
 // app/src/workers/handlers/overdue.handler.ts
 export async function checkOverduePaymentsHandler(job: OverduePaymentsJob) {
   logger.info('Worker', 'Iniciando job de pagos vencidos', { jobId: job.id });
-  const result = await paymentService.processOverduePayments();
-  logger.info('Worker', 'Job de pagos vencidos completado', {
-    jobId: job.id,
-    processed: result.processed,
-    errors: result.errors,
-  });
-  return result;
+  try {
+    const result = await paymentService.processOverduePayments();
+    logger.info('Worker', 'Job de pagos vencidos completado', {
+      jobId: job.id,
+      processed: result.processed,
+      errors: result.errors,
+    });
+    return result;
+  } catch (error) {
+    logger.error('Worker', 'Error en job de pagos vencidos', { jobId: job.id, error });
+    throw error;
+  }
 }
 ```
 
@@ -87,13 +92,20 @@ export async function checkOverduePaymentsHandler(job: OverduePaymentsJob) {
 // app/src/workers/handlers/notifications.handler.ts
 export async function sendEmailHandler(job: SendEmailJob) {
   const { to, subject, html } = job.data;
-  const result = await notificationService.sendEmail({ to, subject, html });
+  logger.info('Worker', 'Procesando job de email', { jobId: job.id, to });
 
-  if (!result.success && result.error) {
-    throw new Error(result.error);
+  try {
+    const result = await notificationService.sendEmail({ to, subject, html });
+
+    if (!result.success && result.error) {
+      throw new Error(result.error);
+    }
+
+    return result;
+  } catch (error) {
+    logger.error('Worker', 'Error enviando email', { jobId: job.id, to, error });
+    throw error;
   }
-
-  return result;
 }
 ```
 
@@ -105,9 +117,16 @@ export async function sendEmailHandler(job: SendEmailJob) {
 // app/src/workers/handlers/renewal.handler.ts
 export async function renewalHandler(job: RenewalJob) {
   const { policyId } = job.data;
-  const result = await policyService.renewPolicy(policyId, undefined);
-  logger.info('Worker', 'Póliza renovada', { policyId, newPolicyId: result.id });
-  return result;
+  logger.info('Worker', 'Procesando renovación de póliza', { jobId: job.id, policyId });
+
+  try {
+    const result = await policyService.renewPolicy(policyId, undefined);
+    logger.info('Worker', 'Póliza renovada', { policyId, newPolicyId: result.id });
+    return result;
+  } catch (error) {
+    logger.error('Worker', 'Error renovando póliza', { jobId: job.id, policyId, error });
+    throw error;
+  }
 }
 ```
 
@@ -201,10 +220,15 @@ All job runs are recorded to the `notifications.job_execution` table, which stor
 | Column | Description |
 |---|---|
 | `job_name` | The `JOB_NAMES` constant value (e.g. `check-overdue-payments`) |
-| `status` | `success` or `error` |
-| `duration_ms` | Wall-clock execution time in milliseconds |
-| `records_processed` | Number of records affected (for batch jobs) |
-| `error_message` | Error detail when `status = 'error'` |
-| `executed_at` | Timestamp of the job run |
+| `job_type` | Optional classifier for the job type |
+| `status` | `running`, `completed`, `failed`, or `partial` |
+| `started_at` | Timestamp when the job began execution |
+| `completed_at` | Timestamp when the job finished (nullable) |
+| `duration_ms` | Wall-clock execution time in milliseconds (nullable) |
+| `records_processed` | Total records examined |
+| `records_succeeded` | Records that completed without error |
+| `records_failed` | Records that encountered an error |
+| `result_summary` | JSON blob with detailed outcome data (nullable) |
+| `error_message` | Error detail when `status = 'failed'` |
 
 This table provides a full audit trail that can be queried from the admin UI or directly via Prisma.

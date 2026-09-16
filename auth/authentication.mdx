@@ -1,5 +1,5 @@
 ---
-title: "Authenticate with OASIS Seguros Using Better-Auth"
+title: "OASIS Seguros Authentication with Better-Auth Sessions"
 sidebarTitle: "Authentication"
 description: "OASIS Seguros uses Better-Auth for session-based authentication with email/password login, bcrypt password hashing, and 7-day session management."
 ---
@@ -57,9 +57,24 @@ export const auth = betterAuth({
 export type Session = typeof auth.$Infer.Session;
 ```
 
-<Note>
-  `BETTER_AUTH_SECRET` must be **at least 32 characters** in production. A short or missing secret will cause session signing to fail silently.
-</Note>
+## Environment Variables
+
+Two environment variables are required for the auth layer to function. Both are referenced directly in the auth source files.
+
+| Variable | Location | Description |
+|---|---|---|
+| `BETTER_AUTH_SECRET` | Server-only | Signing secret for session tokens. Must be **at least 32 characters**. Generate with `openssl rand -base64 32`. |
+| `NEXT_PUBLIC_BETTER_AUTH_URL` | Client & server | Base URL of the application, used by the Better-Auth React client to resolve the `/api/auth` endpoints. Defaults to `http://localhost:3000`. |
+
+```bash
+# .env (minimum auth configuration)
+BETTER_AUTH_SECRET=your-secret-of-at-least-32-chars-here
+NEXT_PUBLIC_BETTER_AUTH_URL=https://your-domain.com
+```
+
+<Warning>
+  `BETTER_AUTH_SECRET` must be **at least 32 characters** in production. A short or missing secret will cause session signing to fail silently. Never commit this value to source control.
+</Warning>
 
 ## Session Management
 

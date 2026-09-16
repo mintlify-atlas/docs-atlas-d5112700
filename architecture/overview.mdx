@@ -1,5 +1,5 @@
 ---
-title: "OASIS Seguros System Architecture Overview"
+title: "OASIS Seguros Architecture: Services and Tech Stack"
 sidebarTitle: "Overview"
 description: "High-level overview of OASIS Seguros architecture: Next.js monolith with Clean Architecture, multi-schema PostgreSQL, Redis, and background workers."
 ---
@@ -10,7 +10,7 @@ OASIS Seguros is a full-stack insurance management platform built as a Next.js 1
 
 The following diagram shows how the four major runtime processes interact:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Docker Compose                               │
 │                                                                     │
@@ -55,7 +55,7 @@ The following diagram shows how the four major runtime processes interact:
 
 The repository is organized into a top-level monorepo with the Next.js application inside `/app`, the Prisma schema alongside it, and supporting documentation and database scripts at the root:
 
-```
+```text
 /app              → Monorepo principal (Next.js 16 + React 19)
 ├── src/
 │   ├── app/      → Rutas Next.js (App Router)

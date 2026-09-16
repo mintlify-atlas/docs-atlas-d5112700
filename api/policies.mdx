@@ -1,5 +1,5 @@
 ---
-title: "Policy Service API Methods in OASIS Seguros"
+title: "PolicyService API Methods and State Machine in OASIS Seguros"
 sidebarTitle: "Policies API"
 description: "Reference for PolicyService methods used in server actions and server components: create, list, update, state transitions, renewal, and statistics."
 ---
@@ -201,7 +201,7 @@ Accepts all `CreatePolicyDto` fields as optional, plus:
 
 OASIS Seguros enforces a strict policy lifecycle state machine. Attempting a transition from an invalid source state throws `AppError(400)`.
 
-```
+```text
 COTIZADA → EN_TRAMITE → PENDIENTE_PAGO → VIGENTE
                      ↓                   ↓
                   CANCELADA          CANCELADA

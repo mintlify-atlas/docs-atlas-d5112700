@@ -1,5 +1,5 @@
 ---
-title: "Payment Service API Methods in OASIS Seguros"
+title: "PaymentService API Methods and Schedule Generation in OASIS"
 sidebarTitle: "Payments API"
 description: "Reference for PaymentService methods: record payments, list with filters, generate schedules, and process overdue installments automatically."
 ---
@@ -39,7 +39,7 @@ Records a new payment against an existing policy. The service automatically:
 </ParamField>
 
 <ParamField body="payment_date" type="string" required>
-  Date payment was received in `YYYY-MM-DD` format. Defaults to today if omitted.
+  Date payment was received in `YYYY-MM-DD` format. Must be a parseable date string.
 </ParamField>
 
 <ParamField body="payer_name" type="string">
